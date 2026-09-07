@@ -1,0 +1,140 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "055d036fe85b54f5a2d333693f5efbc12748ff56",
+  "prompts": {},
+  "commit_stats": {
+    "git_diff_added_lines": 5892,
+    "git_diff_deleted_lines": 0,
+    "ai_additions": 0,
+    "ai_accepted": 0,
+    "BYMC": 5892,
+    "mixed_additions": 0,
+    "BYAC": 0,
+    "BYRC": 0,
+    "per_file": {
+      ".gitignore": {
+        "BYMC": [
+          "1-15"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "LICENSE": {
+        "BYMC": [
+          "1-21"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "README.md": {
+        "BYMC": [
+          "1-151"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "README_zh.md": {
+        "BYMC": [
+          "1-146"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "analyzers/crash_detector.py": {
+        "BYMC": [
+          "1-192"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "analyzers/widget_tree.py": {
+        "BYMC": [
+          "1-686"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "bridge/tcp_bridge.py": {
+        "BYMC": [
+          "1-150"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/BRIDGE.md": {
+        "BYMC": [
+          "1-143"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/USAGE.md": {
+        "BYMC": [
+          "1-247"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/assertions.py": {
+        "BYMC": [
+          "1-225"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/diff_engine.py": {
+        "BYMC": [
+          "1-804"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [
+          "1-1688"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "1-454"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "hmuitest.py": {
+        "BYMC": [
+          "1-826"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "requirements.txt": {
+        "BYMC": [
+          "1"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/common.py": {
+        "BYMC": [
+          "1-31"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/hdc.py": {
+        "BYMC": [
+          "1-112"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788769789,
+  "requirement_id": ""
+}
