@@ -104,6 +104,8 @@ autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
   ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=dialog '确认' detected
   ACTION_VERDICT: CRASHED           | reason=process died after action
   ```
+- **弹窗自动处理** — `ui dismiss-dialogs` / `--auto-handle-dialog` 识别并点掉权限/升级/覆盖层弹窗，流程永远不被卡住。
+- **智能滚动查找** — `ui scroll-find "text"` 自动往下滚到目标出现，不需要脆弱坐标，不需要手写滑动。
 - **控件树检查器** — `tree dump`、`tree diff`、`tree auto`。给你的 App 配的 DevTools。
 - **崩溃检测** — 自动抓 CppCrash / JSCrash / AppFreeze。
 - **Bridge 框架** — Agent 通过 JSON-RPC 调 App 业务方法。
@@ -175,13 +177,18 @@ autoharmony script run login_test.json --json
 
 ## Bridge 框架
 
-需要 Agent 触达 App 业务逻辑？`autoharmony` 自带 JSON-RPC TCP bridge：
+需要 Agent 触达 App 业务逻辑？`autoharmony` 自带 JSON-RPC TCP bridge——登录登出、用户信息、业务数据，App 注册了什么就能调什么：
 
 ```python
 from bridge.tcp_bridge import TcpBridge
 
 bridge = TcpBridge("your-device-id")
-result = bridge.call("navigate", {"route": "MainPage"})
+
+bridge.call("login", {"account": "13800138000"})
+info = bridge.call("getUserInfo")                       # → {"nickname": "星河", "vip": true}
+devices = bridge.call("queryDevices", {"room": "客厅"}) # → {"devices": [...]}
+bridge.call("logout")
+
 bridge.close()
 ```
 

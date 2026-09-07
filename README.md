@@ -107,6 +107,8 @@ We're not here to replace Hypium either — it's a solid library. We're here for
   ACTION_VERDICT: BLOCKED_BY_DIALOG| reason=dialog '确认' detected
   ACTION_VERDICT: CRASHED          | reason=process died after action
   ```
+- **Auto dialog handling** — `ui dismiss-dialogs` / `--auto-handle-dialog` recognize and clear permission/upgrade/overlay popups so the flow never gets stuck.
+- **Smart scroll-find** — `ui scroll-find "text"` scrolls until the target appears — no fragile coordinates, no manual swipes.
 - **Widget tree inspector** — `tree dump`, `tree search`, `tree diff`, `tree auto`. DevTools for your app.
 - **Crash detector** — CppCrash / JSCrash / AppFreeze caught automatically after actions.
 - **Bridge framework** — agents can call app-side business methods over JSON-RPC.
@@ -178,15 +180,22 @@ autoharmony script run login_test.json --json
 
 ## Bridge framework
 
-Need the agent to reach into your app's business logic? `autoharmony` ships a JSON-RPC TCP bridge:
+Need the agent to reach into your app's business logic? `autoharmony` ships a JSON-RPC TCP bridge — login/logout, user info, business data, whatever the app registers:
 
 ```python
 from bridge.tcp_bridge import TcpBridge
 
 bridge = TcpBridge("your-device-id")
-result = bridge.call("navigate", {"route": "MainPage"})
+
+bridge.call("login", {"account": "13800138000"})
+info = bridge.call("getUserInfo")                  # → {"nickname": "...", "vip": true}
+devices = bridge.call("queryDevices", {"room": "客厅"})  # → {"devices": [...]}
+bridge.call("logout")
+
 bridge.close()
 ```
+
+The UI shows a "logged in" page; the session and underlying state are verified in one call.
 
 See [docs/BRIDGE.md](docs/BRIDGE.md) for the protocol and ArkTS server example.
 
