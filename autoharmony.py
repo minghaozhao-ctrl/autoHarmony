@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""hmuitest — HarmonyOS UI Automation Testing CLI
+"""autoharmony — HarmonyOS UI Automation Testing CLI
 
 Subcommands (mutually exclusive):
   aa       Deep Link explicit launch (aa start)
@@ -20,7 +20,7 @@ SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if SKILL_DIR not in sys.path:
     sys.path.insert(0, SKILL_DIR)
 
-RECORD_FILE = os.path.join(SKILL_DIR, ".hmuitest_recording.json")
+RECORD_FILE = os.path.join(SKILL_DIR, ".autoharmony_recording.json")
 
 
 # ==================== JSON Output ====================
@@ -685,7 +685,7 @@ def cmd_script_record(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog='hmuitest',
+        prog='autoharmony',
         description='HarmonyOS UI Automation Testing CLI: '
                     'UI actions & assertions, widget tree analysis, batch scripts.')
     parser.add_argument('--json', dest='json_output', action='store_true',

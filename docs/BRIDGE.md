@@ -1,17 +1,17 @@
 # Bridge Extension Guide
 
-`hmuitest` ships with a generic TCP bridge for communicating with your HarmonyOS app. This doc explains how to extend it with your own business methods.
+`autoharmony` ships with a generic TCP bridge for communicating with your HarmonyOS app. This doc explains how to extend it with your own business methods.
 
 ## How It Works
 
 ```
 ┌─────────────┐    hdc fport     ┌─────────────┐    TCP/JSON-RPC    ┌──────────────┐
-│  hmuitest   │ ──────────────── │   hdc bridge │ ────────────────── │  Your App    │
+│  autoharmony   │ ──────────────── │   hdc bridge │ ────────────────── │  Your App    │
 │  (Python)   │                  │  (pc port)   │                    │  (ArkTS)     │
 └─────────────┘                  └─────────────┘                    └──────────────┘
 ```
 
-1. `hmuitest` sets up an `hdc fport` forwarding from `PC:19999+hash` → `device:9999`
+1. `autoharmony` sets up an `hdc fport` forwarding from `PC:19999+hash` → `device:9999`
 2. Your HarmonyOS app listens on port 9999 and speaks JSON-RPC 2.0
 3. Bridge calls are sent over this tunnel
 

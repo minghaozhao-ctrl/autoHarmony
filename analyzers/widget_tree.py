@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-控件树分析器（类库，CLI 入口见 hmuitest.py）
+控件树分析器（类库，CLI 入口见 autoharmony.py）
 
 用于解析HarmonyOS UITest框架生成的控件树JSON文件，提供概览和搜索功能。
 支持本地文件模式和远程原子操作模式（直接从设备获取并分析）。

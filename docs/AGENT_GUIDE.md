@@ -1,6 +1,6 @@
 # AI Agent Integration Guide
 
-This guide explains how to integrate `hmuitest` with AI agents (Claude, GPT, custom agents) for autonomous HarmonyOS UI testing.
+This guide explains how to integrate `autoharmony` with AI agents (Claude, GPT, custom agents) for autonomous HarmonyOS UI testing.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ Agent (LLM)
     │
     ├── Writes code (ArkTS)
     │
-    ├── Calls hmuitest CLI
+    ├── Calls autoharmony CLI
     │     ├── ui click-by-text "设置" --json
     │     ├── tree dump --json
     │     └── script run regression.json --json
@@ -59,7 +59,7 @@ Every command supports `--json` flag. Agent parses the JSON object directly.
 {
   "status": "BLOCKED_BY_DIALOG",
   "reason": "dialog '确认删除' detected",
-  "suggestion": "dismiss dialog first with: hmuitest.py ui dismiss-dialogs",
+  "suggestion": "dismiss dialog first with: autoharmony.py ui dismiss-dialogs",
   "exit": 1
 }
 ```
@@ -84,15 +84,15 @@ Agent explores the app autonomously:
 
 ```bash
 # 1. Launch app
-python3 hmuitest.py aa start "myapp://home" --bundle com.example.app --json
+python3 autoharmony.py aa start "myapp://home" --bundle com.example.app --json
 
 # 2. Click through pages, record what works
-python3 hmuitest.py ui click-by-text "设置" --json
-python3 hmuitest.py ui scroll-find "关于" --json
-python3 hmuitest.py ui click-by-text "关于" --json
+python3 autoharmony.py ui click-by-text "设置" --json
+python3 autoharmony.py ui scroll-find "关于" --json
+python3 autoharmony.py ui click-by-text "关于" --json
 
 # 3. Save exploration as reusable script
-python3 hmuitest.py script record stop --output regression.json
+python3 autoharmony.py script record stop --output regression.json
 ```
 
 ### Phase 2: Regression (subsequent runs)
@@ -100,7 +100,7 @@ python3 hmuitest.py script record stop --output regression.json
 After code changes, agent reruns saved scripts:
 
 ```bash
-python3 hmuitest.py script run regression.json --json
+python3 autoharmony.py script run regression.json --json
 # → {"all_passed": true, "steps": 5, "failed": 0}
 ```
 
@@ -115,17 +115,17 @@ When UI changes break scripts, agent can:
 
 ```bash
 # 1. Run script, see which step fails
-python3 hmuitest.py script run regression.json --json
+python3 autoharmony.py script run regression.json --json
 # → step 3 failed: NOT_FOUND "旧按钮文本"
 
 # 2. Agent investigates current UI
-python3 hmuitest.py tree dump --overview --json
+python3 autoharmony.py tree dump --overview --json
 
 # 3. Agent finds new text, updates script
 # (agent edits regression.json with new target)
 
 # 4. Rerun
-python3 hmuitest.py script run regression.json --json
+python3 autoharmony.py script run regression.json --json
 # → all_passed: true
 ```
 
@@ -137,9 +137,9 @@ python3 hmuitest.py script run regression.json --json
 import subprocess
 import json
 
-def run_hmuitest(args: list[str]) -> dict:
-    """Run hmuitest and return structured result."""
-    cmd = ["python3", "hmuitest.py"] + args + ["--json"]
+def run_autoharmony(args: list[str]) -> dict:
+    """Run autoharmony and return structured result."""
+    cmd = ["python3", "autoharmony.py"] + args + ["--json"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     
     if result.returncode != 0 and not result.stdout.strip():
@@ -149,7 +149,7 @@ def run_hmuitest(args: list[str]) -> dict:
 
 # Agent tool definition
 tools = [{
-    "name": "hmuitest",
+    "name": "autoharmony",
     "description": "HarmonyOS UI testing. Returns structured verdict.",
     "input_schema": {
         "type": "object",
@@ -166,15 +166,15 @@ tools = [{
 }]
 
 # Agent uses it
-result = run_hmuitest(["ui", "click-by-text", "设置", "--expect-route", "Settings"])
+result = run_autoharmony(["ui", "click-by-text", "设置", "--expect-route", "Settings"])
 if result["status"] == "SUCCESS":
     # Continue exploring
     pass
 elif result["status"] == "BLOCKED_BY_DIALOG":
     # Dismiss dialog first
-    run_hmuitest(["ui", "dismiss-dialogs"])
+    run_autoharmony(["ui", "dismiss-dialogs"])
     # Retry
-    run_hmuitest(["ui", "click-by-text", "设置", "--expect-route", "Settings"])
+    run_autoharmony(["ui", "click-by-text", "设置", "--expect-route", "Settings"])
 ```
 
 ### OpenAI Function Calling
@@ -183,8 +183,8 @@ elif result["status"] == "BLOCKED_BY_DIALOG":
 import subprocess
 import json
 
-def hmuitest_tool(action: str, args: list[str] = None) -> dict:
-    cmd = ["python3", "hmuitest.py"] + action.split() + (args or []) + ["--json"]
+def autoharmony_tool(action: str, args: list[str] = None) -> dict:
+    cmd = ["python3", "autoharmony.py"] + action.split() + (args or []) + ["--json"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     try:
         return json.loads(result.stdout) if result.stdout.strip() else {"error": result.stderr}
@@ -198,7 +198,7 @@ response = client.chat.completions.create(
     tools=[{
         "type": "function",
         "function": {
-            "name": "hmuitest",
+            "name": "autoharmony",
             "description": "Execute HarmonyOS UI action and return structured verdict",
             "parameters": {
                 "type": "object",
@@ -232,13 +232,13 @@ Agent should parse the `status` field for decision-making:
 def robust_action(action_args: list[str], max_retries: int = 3) -> dict:
     """Execute action with automatic error recovery."""
     for attempt in range(max_retries):
-        result = run_hmuitest(["ui"] + action_args + ["--json"])
+        result = run_autoharmony(["ui"] + action_args + ["--json"])
         
         if result["status"] == "SUCCESS":
             return result
         
         if result["status"] == "BLOCKED_BY_DIALOG":
-            run_hmuitest(["ui", "dismiss-dialogs"])
+            run_autoharmony(["ui", "dismiss-dialogs"])
             continue
         
         if result["status"] == "CRASHED":
@@ -246,7 +246,7 @@ def robust_action(action_args: list[str], max_retries: int = 3) -> dict:
         
         if result["status"] == "NOT_FOUND":
             # Agent investigates and finds new target
-            tree = run_hmuitest(["tree", "dump", "--overview", "--json"])
+            tree = run_autoharmony(["tree", "dump", "--overview", "--json"])
             # Agent analyzes tree and updates action_args
             break
     

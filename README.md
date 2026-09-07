@@ -1,187 +1,214 @@
-# hmuitest 🎯
+# autoharmony 🎯
 
-> **Testing toolchain for AI agents.** Agent explores once, script reused forever.
+> **The test toolchain your AI agent writes for itself.**
+> *Agent explores once, script reused forever.*
 
-`hmuitest` is a CLI-first HarmonyOS UI testing tool built for AI agents. The agent autonomously explores your app, generates reusable test scripts, and reruns them after every code change — zero human involvement.
+[![License: MIT](https://img.shields.io/github/license/qkdndqxkr5-ctrl/autoHarmony)]()
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue)]()
+[![Stars](https://img.shields.io/github/stars/qkdndqxkr5-ctrl/autoHarmony)]()
+![Platform: HarmonyOS](https://img.shields.io/badge/platform-HarmonyOS-red)
 
+[中文文档](README_zh.md) · [Agent Guide](docs/AGENT_GUIDE.md) · [Usage](docs/USAGE.md) · [Bridge](docs/BRIDGE.md)
+
+---
+
+## The problem, in one line
+
+> AI writes your HarmonyOS code.
+> Who tests it?
+> **`autoharmony` lets the agent test its own work — and remembers how.**
+
+You (or an agent) explore the app once. Every action is a one-line CLI command that returns a yes/no verdict. The exploration is recorded as a reusable JSON script. Next time the code changes, just rerun the script. No human test cases. No flaky utilities. No retyping the same flow ever again.
+
+**Agent writes code → Agent tests autonomously → Script saved → Next change: just rerun**
+
+---
+
+## Demo
+
+<!-- TODO: record terminal demo with asciinema and place gif here
+     Suggested: 1) script record start  2) a few ui clicks with --json
+     3) script record stop --output demo.json  4) script run demo.json
+     Put the .gif in assets/demo.gif and uncomment the line below.
+![autoharmony demo](assets/demo.gif)
+-->
+
+```bash
+# Agent (or human) explores the app — structured verdict comes back
+$ autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
+{"status": "SUCCESS", "reason": "route changed to SettingsPage", "exit": 0}
+
+# The same flow, saved and rerun forever
+$ autoharmony script record start
+$ autoharmony ui click-by-text "设置"
+$ autoharmony ui click-by-text "关于"
+$ autoharmony script record stop --output settings_test.json
+$ autoharmony script run settings_test.json
+{"all_passed": true, "steps": 2, "failed": 0}
 ```
-Agent writes code → Agent tests autonomously → Script saved → Next change: just rerun
-```
 
-[中文文档](README_zh.md)
-
-## Why?
-
-Because AI agents shouldn't need a human to write test cases. `hmuitest` gives agents:
-
-- **One command = one action** — click, swipe, input, assert. Each returns exit code 0/1, agent knows instantly pass or fail
-- **Structured output** — `--json` flag on every command, agent parses verdict directly, no regex needed
-- **Auto diff reports** — every action snapshots widget tree before/after, agent sees exactly what changed
-- **Script recording** — agent explores once, actions recorded as reusable JSON scripts
-- **Verdict layer** — crash/dialog/route changes auto-detected, one-line `ACTION_VERDICT: SUCCESS | reason=...` for agent consumption
-- **Batch scripts** — 20 test steps in one JSON file, single driver connection, fast
-- **Bridge framework** — agent can call app-side business methods via JSON-RPC
-
-## How It Works
-
-```
-┌──────────────┐     CLI      ┌──────────────┐     hdc     ┌──────────────┐
-│  AI Agent    │ ──────────── │  hmuitest    │ ─────────── │  Device      │
-│  (Claude/    │  exit 0/1    │  (Python)    │  fport      │  (HarmonyOS) │
-│   GPT/etc)   │  JSON out    │              │             │              │
-└──────────────┘              └──────────────┘             └──────────────┘
-      │                              │
-      │    script.json               │
-      └──────── saved ───────────────┘
-            (reused next time)
-```
+---
 
 ## Quick Start
 
-```bash
-git clone https://github.com/qkdndqxkr5-ctrl/hmuitest.git
-cd hmuitest
-pip install -r requirements.txt
-hdc list targets  # verify device connected
-```
-
-### Agent workflow
+> **Write & run your first test in under five minutes.**
 
 ```bash
-# Step 1: Agent explores — each command returns structured verdict
-python3 hmuitest.py ui click-by-text "设置" --expect-route "SettingsPage" --json
-# → {"status": "SUCCESS", "reason": "route changed", "route": "SettingsPage", "exit": 0}
+pip install autoharmony          # or: git clone + pip install .
+hdc list targets              # verify a device is connected
 
-# Step 2: Agent saves exploration as reusable script
-python3 hmuitest.py script record start
-python3 hmuitest.py ui click-by-text "设置"
-python3 hmuitest.py ui scroll-find "关于"
-python3 hmuitest.py ui click-by-text "关于"
-python3 hmuitest.py script record stop --output settings_test.json
-
-# Step 3: Next code change — agent reruns script
-python3 hmuitest.py script run settings_test.json --json
-# → {"all_passed": true, "steps": 3, "failed": 0}
+autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
 ```
 
-### Human workflow (still works)
+That's it. You're ready to point an agent at your app.
 
-```bash
-python3 hmuitest.py ui click 540 550 --expect-route "SettingsPage"
-python3 hmuitest.py tree dump --overview
-python3 hmuitest.py tree auto --operation "Open settings"
-```
+---
 
-## Commands
+## Why autoharmony?
+
+Two different questions need two different answers.
+
+### vs. HarmonyOS testing today
+
+| | **autoharmony** | HMNextAuto | Hypium (official) |
+|---|---|---|---|
+| **Made for** | AI Agents | Humans writing scripts | Humans writing test suites |
+| **First test** | Agent explores in <1 min | Write tests by hand | Build a test project |
+| **Re-run after code change** | `script run test.json` | Re-run library code | Full rebuild + runner |
+| **Agent-readable output** | `--json` verdict, exit 0/1 | Human report | Human report |
+| **Exploration → regression** | Built-in recorder | No | No |
+| **Boilerplate** | Zero (one-liners) | Some | A lot |
+
+### vs. AI vision-driven automation (Midscene et al.)
+
+| | **autoharmony** | Midscene.js |
+|---|---|---|
+| **Trigger** | Deterministic selectors (text / id / type) | Multimodal VLM reading screenshots |
+| **Determinism** | 100% — same input, same verdict, every run | Probabilistic — model-dependent |
+| **Speed** | Milliseconds per action, fully local | Seconds per action (model inference) |
+| **Auditability** | Every action → widget-tree diff + verdict line | Replay depends on current model state |
+| **Runtime deps** | None | VLM API key or self-hosted model |
+
+**The honest split:** if your agent needs to *see* the UI like a human — verify colors, layout, visual polish — use a vision-driven tool. But a regression loop must be **deterministic and fast**: 100 identical runs must give 100 identical verdicts, in milliseconds, with zero flakiness. That's the half of the loop vision models will always be bad at. `autoharmony` is the fast, repeatable, auditable half — and it's the only one built for HarmonyOS.
+
+We're not here to replace Hypium either — it's a solid library. We're here for the **agent loop**: explore → verify → record → replay. That loop needs a CLI, structured output, and instant re-runs. Nobody else has it.
+
+---
+
+## Features for the agent loop
+
+- **One command = one action** — click, swipe, input, assert. Always returns exit code 0/1.
+- **`--json` on everything** — agents parse verdicts directly, zero regex.
+- **Auto diff reports** — every action snapshots the widget tree before/after, so the agent sees exactly what changed (route shifts, dialogs, toggled text).
+- **Script recorder** — exploration becomes a replayable regression script. This is the whole point.
+- **Verdict layer** — crash, stuck-dialog, and route-change auto-detected, summarized in one line:
+  ```
+  ACTION_VERDICT: SUCCESS          | reason=route changed to LoginPage
+  ACTION_VERDICT: BLOCKED_BY_DIALOG| reason=dialog '确认' detected
+  ACTION_VERDICT: CRASHED          | reason=process died after action
+  ```
+- **Widget tree inspector** — `tree dump`, `tree search`, `tree diff`, `tree auto`. DevTools for your app.
+- **Crash detector** — CppCrash / JSCrash / AppFreeze caught automatically after actions.
+- **Bridge framework** — agents can call app-side business methods over JSON-RPC.
+
+---
+
+## Command reference
 
 | Command | What it does | Agent-friendly |
-|---------|-------------|:---:|
+|---------|--------------|:---:|
 | `ui click X Y` | Click coordinates | `--json` |
 | `ui click-by-text "text"` | Click widget by text | `--json` |
 | `ui click-by-id "key"` | Click widget by ID | `--json` |
-| `ui swipe X1 Y1 X2 Y2` | Swipe gesture | `--json` |
+| `ui swipe x1 y1 x2 y2` | Swipe gesture | `--json` |
 | `ui input "text"` | Type into focused field | `--json` |
-| `ui input-by-text "target" "text"` | Type into specific field | `--json` |
-| `ui back` | Press back key | `--json` |
-| `ui scroll-find "text"` | Scroll until text found | `--json` |
+| `ui input-by-text "fld" "txt"` | Type into a specific field | `--json` |
+| `ui back` | Press back | `--json` |
+| `ui scroll-find "text"` | Scroll until found | `--json` |
 | `ui wait-for "text"` | Wait for text to appear | `--json` |
 | `ui screenshot path.png` | Save screenshot | `--json` |
-| `ui dismiss-dialogs` | Auto-dismiss overlays | `--json` |
+| `ui dismiss-dialogs` | Clear overlay dialogs | `--json` |
 | `tree dump` | Dump widget tree | `--json` |
-| `tree diff f1.json f2.json` | Compare two trees | `--json` |
-| `tree auto` | Auto-diff vs baseline | `--json` |
-| `aa start URI` | Launch via Deep Link | `--json` |
-| `script run file.json` | Run batch script | `--json` |
-| `script record start/stop` | Record agent actions | `--json` |
+| `tree diff a.json b.json` | Compare two trees | `--json` |
+| `tree auto` | Diff vs last baseline | `--json` |
+| `aa start "uri://page" --bundle pkg` | Deep-link launch | `--json` |
+| `script run file.json` | Replay test script | `--json` |
+| `script record start/stop` | Record agent exploration | `--json` |
 
-## Structured Output
+Full usage in [docs/USAGE.md](docs/USAGE.md). Agent integration patterns in [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 
-Every command supports `--json` for agent consumption:
+---
 
-```bash
-$ python3 hmuitest.py ui click-by-text "登录" --expect-route "LoginPage" --json
-{
-  "status": "SUCCESS",
-  "reason": "route changed to LoginPage",
-  "action": "click_by_text",
-  "target": "登录",
-  "route_before": "HomePage",
-  "route_after": "LoginPage",
-  "exit": 0
-}
-```
+## Assertions
+
+Every `ui` action supports these, so verification is a flag, not a paragraph:
 
 ```bash
-$ python3 hmuitest.py ui click-by-text "不存在" --json
-{
-  "status": "NOT_FOUND",
-  "reason": "no widget with text '不存在'",
-  "action": "click_by_text",
-  "target": "不存在",
-  "exit": 1
-}
+--expect-route "SettingsPage"       # route changed?
+--expect-text "保存成功"             # text appeared?
+--expect-gone "加载中"               # text disappeared?
+--expect-dialog                      # a dialog popped up?
+--expect-no-change                   # nothing changed (regression)?
+--expect-state "开关:checked=true"   # widget state check
+--timeout 10                         # poll up to N seconds
+--auto-handle-dialog                 # dismiss blockers automatically
 ```
 
-## Verdict System
+---
 
-Every action produces a machine-readable verdict line:
+## Batch scripts
 
-```
-ACTION_VERDICT: SUCCESS | reason=route changed to LoginPage | suggestion=none
-ACTION_VERDICT: NO_CHANGE | reason=no widget tree change | suggestion=check if element exists
-ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=dialog '确认' detected | suggestion=dismiss dialog first
-ACTION_VERDICT: CRASHED | reason=process died after action | suggestion=check crash logs
-```
-
-Agent can parse this directly — no need to interpret human-readable output.
-
-## Batch Scripts
+One JSON file, N steps, single driver connection:
 
 ```json
 [
-  {"cmd": "ui click-by-text", "args": ["登录"], "expect": {"route": "LoginPage"}},
+  {"cmd": "ui click-by-text", "args": ["登录"],  "expect": {"route": "LoginPage"}},
   {"cmd": "ui input-by-text", "args": ["手机号", "13800138000"]},
-  {"cmd": "ui input-by-text", "args": ["密码", "****"]},
-  {"cmd": "ui click-by-text", "args": ["确认"], "expect": {"route": "MainPage"}},
-  {"cmd": "ui screenshot", "args": ["/tmp/logged_in.png"]}
+  {"cmd": "ui input-by-text", "args": ["密码",   "****"]},
+  {"cmd": "ui click-by-text", "args": ["确认"],  "expect": {"route": "MainPage"}},
+  {"cmd": "ui screenshot",    "args": ["/tmp/logged_in.png"]}
 ]
 ```
 
 ```bash
-python3 hmuitest.py script run login_test.json --json
+autoharmony script run login_test.json --json
 ```
 
-## Agent Integration
+---
 
-See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) for:
-- How to integrate with Claude / GPT / custom agents
-- Structured output parsing
-- Script recording workflow
-- Error recovery patterns
+## Bridge framework
 
-## Bridge Framework
-
-Agent can call app-side business methods:
+Need the agent to reach into your app's business logic? `autoharmony` ships a JSON-RPC TCP bridge:
 
 ```python
 from bridge.tcp_bridge import TcpBridge
 
-bridge = TcpBridge(device="your-device-id")
+bridge = TcpBridge("your-device-id")
 result = bridge.call("navigate", {"route": "MainPage"})
 bridge.close()
 ```
 
-See [docs/BRIDGE.md](docs/BRIDGE.md) for full extension guide.
+See [docs/BRIDGE.md](docs/BRIDGE.md) for the protocol and ArkTS server example.
+
+---
 
 ## Requirements
 
 - Python 3.9+
-- `hdc` in PATH
-- Device connected via USB or network
+- `hdc` (HarmonyOS Device Connector) in PATH
+- A HarmonyOS device over USB or network
 
 ## Contributing
 
-Contributions welcome! Open an issue or submit a PR.
+Issues and PRs welcome — especially new engines, better verdicts, and real-world agent integrations. See [CONTRIBUTING](docs/USAGE.md) basics.
+
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=qkdndqxkr5-ctrl/autoHarmony&type=Date)](https://www.star-history.com/#qkdndqxkr5-ctrl/autoHarmony&Date)
+
+Found it useful? ⭐ Star it — it tells agents (and people) this tool works.
+
+---
 
 ## License
 

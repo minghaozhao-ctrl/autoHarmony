@@ -1,5 +1,5 @@
 ---
-name: hmuitest
+name: autoharmony
 description: >-
   HarmonyOS UI 自动化测试工具链：UI 操作（点击/滑动/输入/返回）、断言验证、
   控件树分析/diff、崩溃检测、批量脚本执行、操作录制，全部命令支持 --json
@@ -10,12 +10,12 @@ compatibility: linux, macos, windows
 metadata:
   device: HarmonyOS
   language: python
-  entry: hmuitest.py
+  entry: autoharmony.py
 ---
 
-# hmuitest
+# autoharmony
 
-统一 CLI 入口 `hmuitest.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
+统一 CLI 入口 `autoharmony.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
 所有命令退出码 0/1（0=通过），追加 `--json` 输出结构化 verdict 供 agent 解析。
 
 > 交互流程：每次 `ui` 操作后先读 `ACTION_VERDICT` 与差异报告再执行下一步，
@@ -24,7 +24,7 @@ metadata:
 ## Quick start
 
 ```bash
-UITEST="hmuitest.py"
+UITEST="autoharmony.py"
 
 # Deep Link 启动应用（--bundle 必填）
 python3 $UITEST aa start "myapp://page" --bundle com.example.app
