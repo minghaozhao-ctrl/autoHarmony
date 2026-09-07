@@ -77,6 +77,9 @@ Two different questions need two different answers.
 | **Re-run after code change** | `script run test.json` | Re-run library code | Full rebuild + runner |
 | **Agent-readable output** | `--json` verdict, exit 0/1 | Human report | Human report |
 | **Exploration → regression** | Built-in recorder | No | No |
+| **Crash detection** | Built-in | — | — |
+| **Auto dialog handling** | Built-in | — | — |
+| **Business-layer bridge** | JSON-RPC | — | — |
 | **Boilerplate** | Zero (one-liners) | Some | A lot |
 
 ### vs. AI vision-driven automation (Midscene et al.)
@@ -88,6 +91,9 @@ Two different questions need two different answers.
 | **Speed** | Milliseconds per action, fully local | Seconds per action (model inference) |
 | **Auditability** | Every action → widget-tree diff + verdict line | Replay depends on current model state |
 | **Runtime deps** | None | VLM API key or self-hosted model |
+| **Crash detection** | ✅ process-level | ❌ visual models can't see it |
+| **Dialog handling** | ✅ deterministic | ⚠️ probabilistic |
+| **Business-layer access** | ✅ JSON-RPC | ❌ UI only |
 
 **The honest split:** if your agent needs to *see* the UI like a human — verify colors, layout, visual polish — use a vision-driven tool. But a regression loop must be **deterministic and fast**: 100 identical runs must give 100 identical verdicts, in milliseconds, with zero flakiness. That's the half of the loop vision models will always be bad at. `autoharmony` is the fast, repeatable, auditable half — and it's the only one built for HarmonyOS.
 
