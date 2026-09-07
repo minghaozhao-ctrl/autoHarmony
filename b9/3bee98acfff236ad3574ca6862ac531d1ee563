@@ -1,0 +1,57 @@
+README.md
+  9477533bb6d973e5 94-96
+README_zh.md
+  9477533bb6d973e5 91-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "b93bee98acfff236ad3574ca6862ac531d1ee563",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 0,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 12,
+    "git_diff_deleted_lines": 0,
+    "ai_additions": 6,
+    "ai_accepted": 6,
+    "BYMC": 6,
+    "mixed_additions": 0,
+    "BYAC": 6,
+    "BYRC": 0,
+    "per_file": {
+      "README.md": {
+        "BYMC": [
+          "80-82"
+        ],
+        "BYAC": [
+          "94-96"
+        ],
+        "BYRC": []
+      },
+      "README_zh.md": {
+        "BYMC": [
+          "77-79"
+        ],
+        "BYAC": [
+          "91-93"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788825318,
+  "requirement_id": ""
+}
