@@ -1,168 +1,93 @@
 ---
 name: hmuitest
-description: HarmonyOS UI 自动化测试工具：统一 CLI 入口，HDC UI 操作（自动差异报告）、断言验证、批量脚本、控件树分析、AI Agent 集成。Use when 执行 HarmonyOS UI 自动化测试、页面验证、功能验收，或需要从自然语言用例生成稳定测试脚本时。
-argument-hint: '输入测试场景或脚本文件路径，例如：点击按钮 / 验证页面变化 / script run ./cases.json。'
-user-invocable: true
+description: >-
+  HarmonyOS UI 自动化测试工具链：UI 操作（点击/滑动/输入/返回）、断言验证、
+  控件树分析/diff、崩溃检测、批量脚本执行、操作录制，全部命令支持 --json
+  结构化输出供 AI Agent 消费。Use when 需要执行 HarmonyOS UI 自动化测试、
+  功能验收、页面状态验证、跑回归脚本、生成/录制可复用测试脚本 时。
+license: MIT
+compatibility: linux, macos, windows
+metadata:
+  device: HarmonyOS
+  language: python
+  entry: hmuitest.py
 ---
 
-# HarmonyOS 自动化测试工具
+# hmuitest
 
-## 概述
+统一 CLI 入口 `hmuitest.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
+所有命令退出码 0/1（0=通过），追加 `--json` 输出结构化 verdict 供 agent 解析。
 
-所有功能通过统一入口 `hmuitest.py` 提供，子命令结构互斥（parse 时即校验）：
-
-| 子命令 | 核心能力 | 典型场景 |
-|--------|---------|---------|
-| `aa` | Deep Link 显式启动（aa start） | 跳转指定 URI |
-| `ui` | 点击/滑动/输入/返回 + `--expect-*` 断言，操作后自动差异报告 | 执行 UI 操作并验证 |
-| `tree` | 概览、搜索、差异比较（本地文件 / 远程 dump） | 分析 UI 状态、验证变化 |
-| `script` | 批量脚本执行 / 录制操作 | 跑完整测试流程、录制可复用脚本 |
-
-**核心优势**：一条命令完成操作+差异报告+页面状态摘要；`--expect-*` 让 exit code 直接反映 pass/fail；`--json` 输出结构化结果供 AI Agent 解析。
-
-## AI 行为约束（强制，防盲走）
-
-每次 `ui` 操作后会自动输出两层反馈，AI 必须按以下规则消费，**禁止不看反馈连续盲操作**：
-
-**自动反馈（引擎产出，零参数）**：
-- `ACTION_VERDICT: <状态> | reason=原因 | suggestion=下一步`：每次操作的一行机器可读结论（最高优先级，消费规则见下）
-- 差异报告 + `PAGE_RESULT:` 标记（CHANGES_DETECTED / NO_CHANGES / ROUTE_CHANGED）
-- 断言失败时打印**实际值 vs 期望值**对照与页面现有文本样本
-
-**裁决纠错闭环（意外情况标准应对，禁止盲目重试）**：
-1. `SUCCESS` → 继续下一步
-2. `BLOCKED_BY_DIALOG` → 按 suggestion 点击弹窗按钮，或 `ui dismiss-dialogs` 清理后**重试一次**
-3. `BACK_INEFFECTIVE` → 确认路由栈状态；需回退改用其他导航方式
-4. `CRASHED` / `RESTARTED` → 恢复应用后重试
-5. `NO_CHANGE` → `tree dump` 复核实际状态再决定（`--expect-no-change` 时是预期，继续）
-
-**强制规则**：
-1. **状态确认门槛**：每步操作后，先读 `ACTION_VERDICT` 与状态摘要，非 SUCCESS 且不在上述闭环内 → 禁止执行下一步
-2. **复核义务**：见到 `NO_CHANGE`（且本意是改 UI）→ 先复核再继续
-3. **三振止损**：同一操作连续失败 3 次 → 停止并报告，禁止试第 4 次
-
-## 环境要求
-
-- Python 3.9+
-- `hdc` 在 PATH 中
-- 设备已连接（`hdc list targets` 可查）
+> 交互流程：每次 `ui` 操作后先读 `ACTION_VERDICT` 与差异报告再执行下一步，
+> 禁止不看反馈连续盲操作。同一操作失败 3 次即停止报告，不试第 4 次。
 
 ## Quick start
 
 ```bash
-UITEST="${SKILL_DIR:-.}/hmuitest.py"
+UITEST="hmuitest.py"
 
-# Deep Link 启动应用
+# Deep Link 启动应用（--bundle 必填）
 python3 $UITEST aa start "myapp://page" --bundle com.example.app
 
-# HDC 点击操作（自动返回差异报告）
-python3 $UITEST ui click 540 550 --operation "点击按钮"
+# 语义化点击 + 断言路由变化
+python3 $UITEST ui click-by-text "设置" --expect-route "SettingsPage"
 
-# 语义化点击 + 断言验证
-python3 $UITEST ui click-by-text "设置" --expect-route "SettingsPage" --operation "点击设置"
-
-# AI Agent 模式（结构化输出）
+# Agent 模式：结构化输出
 python3 $UITEST ui click-by-text "设置" --json
+```
 
-# 录制操作序列
+设备检测：自动走 env `HARMONY_DEVICE_ID` → session → `hdc list targets`，可 `--device <ID>` 指定。
+
+## 核心工作流
+
+### 探索（首次）
+逐命令执行 UI 操作，每步用 `--expect-*` 断言验证，成功后 `ui screenshot` 留证。
+
+### 录制（沉淀可复用脚本）
+```bash
 python3 $UITEST script record start
 python3 $UITEST ui click-by-text "设置"
-python3 $UITEST ui scroll-find "关于"
-python3 $UITEST script record stop --output test.json
-
-# 批量执行
-python3 $UITEST script run test.json
+python3 $UITEST script record stop --output regression.json
 ```
 
-## 决策树
-
-| 任务 | 推荐路径 |
-|------|----------|
-| 跳转指定 URI / Deep Link | `aa start <URI> --bundle <bundleName>` |
-| 单次 UI 操作验证（点/滑/输入） | `ui click` 等坐标操作 |
-| 语义化操作（按文本/ID 点击） | `ui click-by-text` 等 |
-| 操作后精确验证（路由/文本/弹窗/状态） | 任意 `ui` 操作追加 `--expect-*` |
-| 多步用例一键执行 | `script run cases.json` |
-| 检查弹窗/控件是否存在 | `ui check-dialog` / `ui check-exist` |
-| 长列表滚动查找 | `ui scroll-find` |
-| 被弹窗挡住 / 清理弹窗 | `ui dismiss-dialogs` |
-| 等待加载/异步文本出现或消失 | `ui wait-for` |
-| 差异对比、回归验证 | `tree auto` 或 `tree diff` |
-| AI Agent 自动化测试 | 所有命令追加 `--json` |
-
-## 子命令速查
-
-### ui — UI 操作 + 断言
-
-**坐标操作**：`click` / `double-click` / `long-click` / `swipe` / `input` / `back`
-
-**语义化操作**：`click-by-text` / `click-by-id` / `click-by-type` / `double-click-by-text` / `long-click-by-text` / `input-by-text` / `input-by-type` / `swipe-direction`
-
-**辅助工具**：`screenshot` / `check-dialog` / `check-exist` / `find` / `scroll-find` / `dismiss-dialogs` / `wait-for`
-
-### tree — 控件树分析
-
-- `tree show <file>` — 分析本地 JSON 文件
-- `tree dump` — 从设备 dump 并分析
-- `tree diff <f1> <f2>` — 对比两个控件树
-- `tree auto` — 自动与上次基线 diff
-
-### script — 批量脚本
-
-- `script run <file.json>` — 执行批量脚本
-- `script record start/stop` — 录制操作序列
-
-### aa — Deep Link 启动
-
-- `aa start <URI> --bundle <bundleName>` — 通过 Deep Link 启动应用
-
-## 断言参数
-
-每个 `ui` 操作都支持：
-
+### 回归（改代码后）
 ```bash
---expect-route "RouteName"       # 路由变化
---expect-text "文本"              # 文字出现
---expect-gone "文本"              # 文字消失
---expect-dialog                  # 弹窗出现
---expect-no-change               # 无变化（回归检查）
---expect-state "组件:attr=value"  # 控件状态
---timeout 10                     # 超时轮询（秒）
---auto-handle-dialog             # 自动处理弹窗
+python3 $UITEST script run regression.json --json
+# → {"all_passed": true, "steps": N, "failed": 0}
 ```
+某步失败时：`tree dump` 查当前控件 → 改脚本目标文本 → 重跑。
 
-## 输出格式
+## 裁决决策树
 
-```bash
-# 默认：人类可读
-python3 hmuitest.py ui click-by-text "设置"
-# ACTION_VERDICT: SUCCESS | reason=route changed to SettingsPage
+每条 `ui` 操作输出一行 `ACTION_VERDICT: <状态> | reason=… | suggestion=…`，按此消费：
 
-# Agent 可解析 JSON
-python3 hmuitest.py ui click-by-text "设置" --json
-# {"status": "SUCCESS", "reason": "route changed to SettingsPage", "exit": 0}
-```
+| 状态 | 含义 | 应对 |
+|------|------|------|
+| `SUCCESS` | 操作+断言通过 | 继续下一步 |
+| `BLOCKED_BY_DIALOG` | 弹窗挡住 | `ui dismiss-dialogs` 后重试一次 |
+| `CRASHED` / `RESTARTED` | 进程崩溃 | 重启应用后重试 |
+| `NO_CHANGE` | UI 无变化 | `tree dump` 复核（`--expect-no-change` 时是预期，继续） |
+| `BACK_INEFFECTIVE` | 返回无效 | 改用目标页导航 |
 
-## 项目结构
+## Examples
 
-```
-hmuitest/
-├── hmuitest.py           # CLI 入口
-├── engines/
-│   ├── engines.py        # 操作引擎（HdcUITestEngine / HypiumEngine）
-│   ├── diff_engine.py    # 控件树差异比较
-│   ├── assertions.py     # 断言库
-│   └── verdict.py        # 统一裁决层
-├── analyzers/
-│   ├── widget_tree.py    # 控件树分析器
-│   └── crash_detector.py # 崩溃检测
-├── utils/
-│   ├── hdc.py            # hdc 工具函数
-│   └── common.py         # 通用工具
-├── bridge/
-│   └── tcp_bridge.py     # TCP Bridge（JSON-RPC 2.0）
-└── docs/
-    ├── AGENT_GUIDE.md    # AI Agent 集成指南
-    ├── BRIDGE.md         # Bridge 扩展指南
-    └── USAGE.md          # 完整使用指南
-```
+- 用户说"帮我测一下登录流程" → `script record start` → 依次 `click-by-text "登录"` / `input-by-text` / 断言路由 → `script record stop` 生成脚本
+- 用户说"检查设置页打开对不对" → `aa start <uri> --bundle <bundleName>` → `ui click-by-text "设置" --expect-route "SettingsPage" --expect-text "语言"`
+- 用户说"跑一遍回归" → 找到已有 `*.json` 脚本 → `script run <file> --json`
+
+## Troubleshooting
+
+| 问题 | 处理 |
+|------|------|
+| 操作全失败且 verdict 为 `NO_CHANGE` | `tree dump --overview` 看页面真实状态，确认目标文本/坐标是否变化 |
+| `ui click-by-text` 点错（多匹配） | 追加 `--index N`，或改用 `click-by-id` |
+| 图像按钮点不到 | `ui find --type Image` 查 key/id，优先 `click-by-id`，避免坐标 |
+| 脚本某步失败 | 详见 `docs/AGENT_GUIDE.md` 的"自愈脚本"章节 |
+
+## References
+
+按需读取，读哪个由当前任务决定：
+
+- **命令大全与参数**（需要精确命令/参数/断言选项时）→ [docs/USAGE.md](docs/USAGE.md)
+- **AI Agent 集成**（写 agent 工具定义、解析 verdict、错误恢复时）→ [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
+- **Bridge 扩展**（需要和 App 通信、自定义业务方法时）→ [docs/BRIDGE.md](docs/BRIDGE.md)
