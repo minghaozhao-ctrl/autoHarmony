@@ -20,6 +20,39 @@ SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if SKILL_DIR not in sys.path:
     sys.path.insert(0, SKILL_DIR)
 
+RECORD_FILE = os.path.join(SKILL_DIR, ".hmuitest_recording.json")
+
+
+# ==================== JSON Output ====================
+
+def _emit_json(result: dict, args=None):
+    """Emit structured JSON output and exit."""
+    if args and getattr(args, 'json_output', False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(result.get("exit", 0 if result.get("status") == "SUCCESS" else 1))
+    return result
+
+
+def _make_verdict(status: str, reason: str, **extra) -> dict:
+    """Build a standard verdict dict."""
+    d = {"status": status, "reason": reason, "exit": 0 if status == "SUCCESS" else 1}
+    d.update(extra)
+    return d
+
+
+def _record_step(cmd: str, args_list: list):
+    """Append a step to the recording file if recording is active."""
+    if not os.path.exists(RECORD_FILE):
+        return
+    try:
+        with open(RECORD_FILE, 'r', encoding='utf-8') as f:
+            steps = json.load(f)
+    except Exception:
+        steps = []
+    steps.append({"cmd": cmd, "args": args_list})
+    with open(RECORD_FILE, 'w', encoding='utf-8') as f:
+        json.dump(steps, f, ensure_ascii=False, indent=2)
+
 
 # ==================== Common Utilities ====================
 
@@ -28,7 +61,6 @@ def _detect_device(explicit):
     from utils.hdc import detect_device_id
     device_id = explicit or detect_device_id()
     if not device_id:
-        print("❌ No hdc device detected (run 'hdc list targets' or set HARMONY_DEVICE_ID)")
         sys.exit(1)
     return device_id
 
@@ -101,7 +133,6 @@ def _run_ui_action(args, engine, action_fn):
     auto_dialog = getattr(args, 'auto_handle_dialog', False)
 
     if auto_dialog and expectations and expectations.get('no_change'):
-        print("⚠️  --auto-handle-dialog conflicts with --expect-no-change, ignoring no_change")
         expectations.pop('no_change', None)
 
     if auto_dialog:
@@ -109,7 +140,14 @@ def _run_ui_action(args, engine, action_fn):
 
     pass_expect = None if auto_dialog else expectations
     ok = action_fn(pass_expect)
+
+    # Record step if recording
+    if ok:
+        _record_step(getattr(args, '_record_cmd', ''), getattr(args, '_record_args', []))
+
     if not ok:
+        verdict = _make_verdict("FAILED", "Action failed")
+        _emit_json(verdict, args)
         return False
 
     if auto_dialog:
@@ -120,6 +158,10 @@ def _run_ui_action(args, engine, action_fn):
                 dump_fn=lambda: engine._dump_and_load("dialog_poll"),
                 cleanup_fn=lambda a: a.cleanup(),
                 device=args.device)
+
+    verdict = _make_verdict("SUCCESS" if ok else "FAILED",
+                            "Action completed" if ok else "Assertions failed")
+    _emit_json(verdict, args)
     return ok
 
 
@@ -155,6 +197,8 @@ def _hdc_engine(args):
 
 def cmd_ui_click(args):
     engine = _hdc_engine(args)
+    args._record_cmd = "ui click"
+    args._record_args = [str(args.x), str(args.y)]
 
     def action(expectations):
         return engine.click(args.x, args.y, args.operation, expectations=expectations,
@@ -191,6 +235,8 @@ def cmd_ui_long_click(args):
 
 def cmd_ui_swipe(args):
     engine = _hdc_engine(args)
+    args._record_cmd = "ui swipe"
+    args._record_args = [str(args.x1), str(args.y1), str(args.x2), str(args.y2)]
 
     def action(expectations):
         return engine.swipe(args.x1, args.y1, args.x2, args.y2, args.operation,
@@ -204,6 +250,8 @@ def cmd_ui_swipe(args):
 
 def cmd_ui_input(args):
     engine = _hdc_engine(args)
+    args._record_cmd = "ui input"
+    args._record_args = [args.text]
 
     def action(expectations):
         return engine.text_input(args.text, args.operation, expectations=expectations,
@@ -216,6 +264,8 @@ def cmd_ui_input(args):
 
 def cmd_ui_back(args):
     engine = _hdc_engine(args)
+    args._record_cmd = "ui back"
+    args._record_args = []
 
     def action(expectations):
         return engine.key_back(args.operation, expectations=expectations,
@@ -236,6 +286,8 @@ def _hypium_engine(args):
 
 def cmd_ui_click_by_text(args):
     engine = _hypium_engine(args)
+    args._record_cmd = "ui click-by-text"
+    args._record_args = [args.text]
 
     def action(expectations):
         return engine.click_by_text(args.text, args.operation, expectations=expectations,
@@ -374,7 +426,12 @@ def cmd_ui_find(args):
 
 def cmd_ui_scroll_find(args):
     engine = _hypium_engine(args)
+    args._record_cmd = "ui scroll-find"
+    args._record_args = [args.text]
     ok = engine.scroll_find(args.text, max_swipes=args.swipes)
+    verdict = _make_verdict("SUCCESS" if ok else "FAILED",
+                            f"Found '{args.text}'" if ok else f"'{args.text}' not found after {args.swipes} swipes")
+    _emit_json(verdict, args)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
 
@@ -570,13 +627,58 @@ def cmd_tree_auto(args):
 def cmd_script_run(args):
     from engines.engines import BatchRunner
     if not os.path.exists(args.file):
+        verdict = _make_verdict("FAILED", f"Script file not found: {args.file}")
+        _emit_json(verdict, args)
         print(f"❌ Script file not found: {args.file}")
         sys.exit(1)
     with open(args.file, 'r', encoding='utf-8') as f:
         script = json.load(f)
     runner = BatchRunner(device=args.device, history_dir=args.history_dir)
     result = runner.run(script)
+    verdict = _make_verdict("SUCCESS" if result['all_passed'] else "FAILED",
+                            f"{result.get('passed', 0)}/{result.get('total', 0)} steps passed",
+                            all_passed=result['all_passed'],
+                            passed=result.get('passed', 0),
+                            failed=result.get('failed', 0),
+                            total=result.get('total', 0))
+    _emit_json(verdict, args)
     sys.exit(0 if result['all_passed'] else 1)
+
+
+def cmd_script_record(args):
+    if args.record_action == 'start':
+        with open(RECORD_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
+        verdict = _make_verdict("SUCCESS", "Recording started",
+                                record_file=RECORD_FILE)
+        _emit_json(verdict, args)
+        print(f"🔴 Recording started → {RECORD_FILE}")
+    elif args.record_action == 'stop':
+        if not os.path.exists(RECORD_FILE):
+            verdict = _make_verdict("FAILED", "No recording in progress")
+            _emit_json(verdict, args)
+            sys.exit(1)
+        with open(RECORD_FILE, 'r', encoding='utf-8') as f:
+            steps = json.load(f)
+        output = args.output or "recorded_script.json"
+        with open(output, 'w', encoding='utf-8') as f:
+            json.dump(steps, f, ensure_ascii=False, indent=2)
+        os.remove(RECORD_FILE)
+        verdict = _make_verdict("SUCCESS",
+                                f"Recording saved: {len(steps)} steps",
+                                output=output, steps=len(steps))
+        _emit_json(verdict, args)
+        print(f"✅ Recording saved: {len(steps)} steps → {output}")
+    elif args.record_action == 'status':
+        active = os.path.exists(RECORD_FILE)
+        steps = 0
+        if active:
+            with open(RECORD_FILE, 'r', encoding='utf-8') as f:
+                steps = len(json.load(f))
+        verdict = _make_verdict("SUCCESS",
+                                "Recording active" if active else "Not recording",
+                                recording=active, steps=steps)
+        _emit_json(verdict, args)
 
 
 # ==================== parser ====================
@@ -586,6 +688,8 @@ def build_parser():
         prog='hmuitest',
         description='HarmonyOS UI Automation Testing CLI: '
                     'UI actions & assertions, widget tree analysis, batch scripts.')
+    parser.add_argument('--json', dest='json_output', action='store_true',
+                        help='Output structured JSON (for AI agents)')
     sub = parser.add_subparsers(dest='command', metavar='<command>', required=True)
 
     # ---------- aa ----------
@@ -807,6 +911,13 @@ def build_parser():
                    help='History directory (default: system temp)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_script_run)
+
+    p = script_sub.add_parser('record', help='Record UI actions as reusable script')
+    p.add_argument('record_action', choices=['start', 'stop', 'status'],
+                   help='start: begin recording, stop: save & stop, status: check')
+    p.add_argument('--output', '-o', default=None,
+                   help='Output script file (default: recorded_script.json)')
+    p.set_defaults(func=cmd_script_record)
 
     return parser
 
