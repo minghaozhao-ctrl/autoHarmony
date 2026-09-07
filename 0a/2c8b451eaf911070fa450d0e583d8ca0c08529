@@ -1,0 +1,69 @@
+SKILL.md
+  9477533bb6d973e5 3-13,16,18-19,21-22,27,29,32-33,35,39,41,43-44,46-47,50,53,55-56,58,60,62,64-70,72,74-76,78,80-85,87,89,91-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "0a2c8b451eaf911070fa450d0e583d8ca0c08529",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 62,
+      "total_deletions": 137,
+      "accepted_lines": 66,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 62,
+    "git_diff_deleted_lines": 137,
+    "ai_additions": 57,
+    "ai_accepted": 57,
+    "BYMC": 0,
+    "mixed_additions": 0,
+    "BYAC": 57,
+    "BYRC": 0,
+    "per_file": {
+      "SKILL.md": {
+        "BYMC": [],
+        "BYAC": [
+          "3-13",
+          "16",
+          "18-19",
+          "21-22",
+          "27",
+          "29",
+          "32-33",
+          "35",
+          "39",
+          "41",
+          "43-44",
+          "46-47",
+          "50",
+          "53",
+          "55-56",
+          "58",
+          "60",
+          "62",
+          "64-70",
+          "72",
+          "74-76",
+          "78",
+          "80-85",
+          "87",
+          "89",
+          "91-93"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788823862,
+  "requirement_id": ""
+}
