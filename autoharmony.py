@@ -172,6 +172,9 @@ def cmd_aa_start(args):
     engine = HypiumEngine(device=args.device,
                           history_dir=getattr(args, 'history_dir', None))
     params = json.loads(args.params) if args.params else None
+    args._record_cmd = "aa start"
+    args._record_args = [args.uri or "", args.bundle or "",
+                         args.ability or ""]
 
     def action(expectations):
         return engine.aa_start(

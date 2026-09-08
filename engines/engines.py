@@ -447,7 +447,7 @@ def auto_handle_dialogs(device: Optional[str] = None, max_rounds: int = 3) -> bo
         是否处理过至少一个弹窗
     """
     import time
-    from verdict import find_overlays, find_dismiss_button
+    from engines.verdict import find_overlays, find_dismiss_button
 
     engine = HdcUITestEngine(device=device)
     analyzer = WidgetTreeAnalyzer(json_file="auto_dialog.json", device=device)
@@ -850,6 +850,14 @@ class HypiumEngine:
                             is_back=is_back, check_exit=check_exit,
                             skip_before=skip_before, fresh_before=fresh_before)
 
+    def _touch_guard(self, fn: Callable) -> bool:
+        """hypium 匹配不到目标时抛异常而非返回值，这里归一为 False 供 fuzzy 回退判定。"""
+        try:
+            result = fn()
+            return True if result is None else bool(result)
+        except Exception:
+            return False
+
     def click_by_text(self, text: str, operation: str = "",
                       expectations: Optional[dict] = None,
                       skip_before: bool = False,
@@ -866,15 +874,18 @@ class HypiumEngine:
                                              fresh_before=fresh_before,
                                              auto_recover=auto_recover)
         result = self._execute_hypium_and_compare(
-            lambda: self._get_driver().touch(BY.text(text)), desc,
+            lambda: self._touch_guard(
+                lambda: self._get_driver().touch(BY.text(text))), desc,
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
         if result:
             return True
-        if expectations or skip_before:
+        if skip_before:
             return False
         print(f"ℹ️  精确匹配失败，尝试文本包含搜索...")
         return self._click_by_text_fuzzy(text, desc,
+                                         expectations=expectations,
+                                         skip_before=skip_before,
                                          fresh_before=fresh_before,
                                          auto_recover=auto_recover)
 
@@ -1077,8 +1088,9 @@ class HypiumEngine:
                         fresh_before: bool = False,
                         auto_recover: bool = True) -> bool:
         desc = operation or f"向 {direction} 滑动 {distance}"
+        # hypium swipe() 返回 None（无返回值语义），包装为成功
         return self._execute_hypium_and_compare(
-            lambda: self._get_driver().swipe(direction, distance=distance), desc,
+            lambda: (self._get_driver().swipe(direction, distance=distance) or True), desc,
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
 
@@ -1416,20 +1428,77 @@ class BatchRunner:
     }
     # 会改变 UI 的桥接操作：执行后刷新 diff 历史基准
     UI_MUTATING_BRIDGE_ACTIONS = {'navigate', 'navigate_back', 'login',
-                                  'logout', 'click_device_card'}
+                                   'logout', 'click_device_card'}
+
+    # 录制产出 ({cmd, args}) 到脚本 step 的映射；坐标族由 Hdc 引擎回放
+    RECORD_ACTION_MAP: dict = {
+        'ui back': ('go_back', ()),
+        'ui click-by-text': ('click_by_text', ('text',)),
+        'ui click-by-id': ('click_by_id', ('key',)),
+        'ui long-click-by-text': ('long_click_by_text', ('text',)),
+        'ui click': ('click', ('x', 'y')),
+        'ui double-click': ('double_click', ('x', 'y')),
+        'ui long-click': ('long_click', ('x', 'y')),
+        'ui swipe': ('swipe', ('x1', 'y1', 'x2', 'y2')),
+        'ui input': ('text_input', ('text',)),
+        'aa start': ('aa_start', ('uri', 'bundle_name', 'ability_name')),
+    }
+    COORD_ACTIONS = {'click', 'double_click', 'long_click', 'swipe',
+                     'text_input', 'key_back'}
 
     def __init__(self, device: Optional[str] = None,
                  history_dir: Optional[str] = None,
                  engine_type: str = 'hypium'):
         self.device = device
-        if engine_type == 'hypium':
-            self.engine = HypiumEngine(device=device, history_dir=history_dir)
-        else:
-            self.engine = HdcUITestEngine(device=device, history_dir=history_dir)
+        self.history_dir = history_dir
+        self.engine_type = engine_type
+        self.engine = None
         self.results: list = []
+
+    def _ensure_engine(self, engine_type: str):
+        """按需创建引擎（lazy；录制含坐标动作时自动切 Hdc 引擎）"""
+        if self.engine is not None and self.engine_type == engine_type:
+            return self.engine
+        if self.engine is not None and hasattr(self.engine, 'close'):
+            self.engine.close()
+        self.engine_type = engine_type
+        if engine_type == 'hypium':
+            self.engine = HypiumEngine(device=self.device,
+                                       history_dir=self.history_dir)
+        else:
+            self.engine = HdcUITestEngine(device=self.device,
+                                          history_dir=self.history_dir)
+        return self.engine
+
+    def _recorded_to_step(self, rec: dict) -> Optional[dict]:
+        """把录制的一条步骤 (cmd, args) 转成脚本 step（未知动作跳过）"""
+        cmd = (rec.get('cmd') or '').strip()
+        if cmd not in self.RECORD_ACTION_MAP:
+            print(f"⚠️ 跳过无法回放的动作: {cmd!r}")
+            return None
+        action, keys = self.RECORD_ACTION_MAP[cmd]
+        args = rec.get('args') or []
+        params = dict(zip(keys, args))
+        return {
+            'action': action, 'params': params,
+            'desc': (cmd + ' ' + ' '.join(str(a) for a in args)).rstrip(),
+            'stop_on_fail': True,
+        }
+
+    def _normalize_script(self, script: dict) -> dict:
+        """兼容两类输入：{name, steps} 完整脚本 与 [{cmd, args}] 录制清单"""
+        if isinstance(script, list):
+            steps = [s for s in (self._recorded_to_step(r) for r in script)
+                     if s is not None]
+            uses_coord = any(s['action'] in self.COORD_ACTIONS for s in steps)
+            self._ensure_engine('hdc' if uses_coord else 'hypium')
+            return {'name': '录制脚本自动回放', 'steps': steps}
+        self._ensure_engine(self.engine_type)
+        return script
 
     def run(self, script: dict) -> dict:
         """执行脚本，返回结果摘要"""
+        script = self._normalize_script(script)
         name = script.get('name', '未命名脚本')
         steps = script.get('steps', [])
 

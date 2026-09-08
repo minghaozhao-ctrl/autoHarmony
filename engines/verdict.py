@@ -94,14 +94,14 @@ def find_overlays(widgets: List[dict], screen_bounds=None) -> List[dict]:
 
 def overlay_summary(widgets: List[dict], overlay: dict, max_items: int = 6) -> str:
     """覆盖层子树内的可读文本（标题/按钮），用于裁决 reason"""
-    from engines import _overlay_texts
+    from engines.engines import _overlay_texts
     texts = _overlay_texts(widgets, overlay)
     return " / ".join(texts[:max_items])
 
 
 def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
     """在覆盖层后代中按优先级找可点击的确认按钮"""
-    from engines import _is_descendant_index
+    from engines.engines import _is_descendant_index
     ov_idx = None
     for i, w in enumerate(widgets):
         if w is overlay:
@@ -224,7 +224,7 @@ class ActionPipeline:
 
         复用条件：未强制 fresh，且历史存在、新鲜、路由与当前一致。
         """
-        from engines import _compute_page_signature
+        from engines.engines import _compute_page_signature
         e = self.engine
 
         if not fresh_before:
@@ -285,9 +285,9 @@ class ActionPipeline:
         Returns:
             裁决 + 断言是否全部通过（决定 exit code）
         """
-        from engines import (_compute_page_signature, print_page_state_summary,
-                             check_expectations_with_polling,
-                             auto_handle_dialogs, STATE_TYPE_LABELS)
+        from engines.engines import (_compute_page_signature, print_page_state_summary,
+                                     check_expectations_with_polling,
+                                     auto_handle_dialogs, STATE_TYPE_LABELS)
         e = self.engine
         print(f"执行: {desc}")
 
@@ -382,7 +382,7 @@ class ActionPipeline:
         Returns:
             (verdict, after_analyzer, report)；dump 失败时 (None, None, None)
         """
-        from engines import _compute_page_signature
+        from engines.engines import _compute_page_signature
         e = self.engine
 
         after = e._dump_and_load("after")
@@ -403,7 +403,7 @@ class ActionPipeline:
         # 差异比较（路由变化或内容变化）
         report = None
         if before_sig is not None and before_sig != after_sig:
-            from diff_engine import ChangeReport
+            from engines.diff_engine import ChangeReport
             print(f"🧭 页面变化: {before_sig}  ⟶  {after_sig}")
             after.overview()
             report = ChangeReport(desc)
@@ -444,7 +444,7 @@ class ActionPipeline:
 
     @staticmethod
     def _has_state_controls(widgets) -> bool:
-        from engines import STATE_TYPE_LABELS
+        from engines.engines import STATE_TYPE_LABELS
         return any((w.get('type', '') or '').lower() in STATE_TYPE_LABELS
                    for w in widgets)
 
