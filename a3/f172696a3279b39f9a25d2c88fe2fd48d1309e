@@ -1,0 +1,132 @@
+README_zh.md
+  9477533bb6d973e5 205-220
+README.md
+  9477533bb6d973e5 210-225
+docs/agent-guides/claude-code.md
+  9477533bb6d973e5 1-40
+docs/agent-guides/cline.md
+  9477533bb6d973e5 1-28
+docs/agent-guides/codex.md
+  9477533bb6d973e5 1-30
+docs/agent-guides/cursor.md
+  9477533bb6d973e5 1-36
+SKILL.md
+  9477533bb6d973e5 93-94
+docs/agent-guides/copilot.md
+  9477533bb6d973e5 1-29
+docs/agent-guides/windsurf.md
+  9477533bb6d973e5 1-28
+docs/agent-guides/goose.md
+  9477533bb6d973e5 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "a3f172696a3279b39f9a25d2c88fe2fd48d1309e",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 255,
+      "total_deletions": 1,
+      "accepted_lines": 255,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 287,
+    "git_diff_deleted_lines": 1,
+    "ai_additions": 255,
+    "ai_accepted": 255,
+    "BYMC": 32,
+    "mixed_additions": 0,
+    "BYAC": 255,
+    "BYRC": 0,
+    "per_file": {
+      "README.md": {
+        "BYMC": [],
+        "BYAC": [
+          "210-225"
+        ],
+        "BYRC": []
+      },
+      "README_zh.md": {
+        "BYMC": [],
+        "BYAC": [
+          "205-220"
+        ],
+        "BYRC": []
+      },
+      "SKILL.md": {
+        "BYMC": [],
+        "BYAC": [
+          "93-94"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/README.md": {
+        "BYMC": [
+          "1-32"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/agent-guides/claude-code.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-40"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/cline.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-28"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/codex.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-30"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/copilot.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-29"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/cursor.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-36"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/goose.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-30"
+        ],
+        "BYRC": []
+      },
+      "docs/agent-guides/windsurf.md": {
+        "BYMC": [],
+        "BYAC": [
+          "1-28"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788832224,
+  "requirement_id": ""
+}
