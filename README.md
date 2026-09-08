@@ -207,6 +207,22 @@ See [docs/BRIDGE.md](docs/BRIDGE.md) for the protocol and ArkTS server example.
 
 ---
 
+## Install as an Agent skill
+
+`autoharmony` is distributed as a standard agent skill — drop it into your coding agent, and it verifies its own HarmonyOS work:
+
+```bash
+git clone git@github.com:qkdndqxkr5-ctrl/autoHarmony.git
+cp autoHarmony/SKILL.md ~/.claude/skills/autoharmony/SKILL.md                  # Claude Code
+cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc                          # Cursor
+cp autoHarmony/SKILL.md AGENTS.md                                               # Copilot / Codex / Goose
+cp autoHarmony/SKILL.md .windsurfrules                                          # Windsurf
+cp autoHarmony/SKILL.md .clinerules                                             # Cline
+```
+
+Per-client setup, config snippets, and the explore → record → replay loop:
+→ [docs/agent-guides/](docs/agent-guides/)
+
 ## Requirements
 
 - Python 3.9+

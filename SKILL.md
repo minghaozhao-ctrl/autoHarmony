@@ -91,3 +91,4 @@ python3 $UITEST script run regression.json --json
 - **命令大全与参数**（需要精确命令/参数/断言选项时）→ [docs/USAGE.md](docs/USAGE.md)
 - **AI Agent 集成**（写 agent 工具定义、解析 verdict、错误恢复时）→ [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
 - **Bridge 扩展**（需要和 App 通信、自定义业务方法时）→ [docs/BRIDGE.md](docs/BRIDGE.md)
+- **把本 skill 装进 Claude Code / Cursor / Copilot / Codex / Windsurf / Cline / Goose** → [docs/agent-guides/README.md](docs/agent-guides/README.md)

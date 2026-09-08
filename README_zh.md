@@ -202,6 +202,22 @@ bridge.close()
 
 ---
 
+## 安装为你的 Agent 的 skill
+
+`autoharmony` 以标准 Agent skill 分发——丢给你的编码 Agent，它就会自己验证自己写的鸿蒙代码：
+
+```bash
+git clone git@github.com:qkdndqxkr5-ctrl/autoHarmony.git
+cp autoHarmony/SKILL.md ~/.claude/skills/autoharmony/SKILL.md   # Claude Code
+cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc           # Cursor
+cp autoHarmony/SKILL.md AGENTS.md                                # Copilot / Codex / Goose
+cp autoHarmony/SKILL.md .windsurfrules                           # Windsurf
+cp autoHarmony/SKILL.md .clinerules                              # Cline
+```
+
+各客户端的配置细节、片段、探索 → 录制 → 重放循环：
+→ [docs/agent-guides/](docs/agent-guides/)
+
 ## 环境要求
 
 - Python 3.9+
