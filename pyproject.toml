@@ -21,6 +21,9 @@ classifiers = [
 [project.scripts]
 autoharmony = "autoharmony:main"
 
+[project.optional-dependencies]
+semantic = ["hypium"]
+
 [tool.setuptools]
 py-modules = ["autoharmony"]
 

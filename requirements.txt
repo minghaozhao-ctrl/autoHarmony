@@ -1,1 +1,4 @@
 json5>=0.9.0
+# 可选：语义化命令（click-by-text / click-by-id / input-by-text …）
+# pip install autoharmony[semantic] 等价于下面这行
+hypium

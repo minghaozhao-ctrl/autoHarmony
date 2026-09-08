@@ -23,6 +23,17 @@ from utils.common import run_hdc_command
 from engines.verdict import ActionPipeline
 
 
+def _import_hypium():
+    """Optional dependency guard: hypium powers semantic commands (click-by-text etc.)."""
+    try:
+        from hypium import BY, UiDriver
+    except ImportError:
+        print("❌ 缺少可选依赖 hypium：语义化命令需要它。")
+        print("   安装: pip install autoharmony[semantic]   (或本仓库: pip install -r requirements.txt)")
+        raise SystemExit(1)
+    return BY, UiDriver
+
+
 class _OperationTimeout(Exception):
     """操作超时异常"""
 
@@ -732,7 +743,7 @@ class HypiumEngine:
     def _get_driver(self):
         if self._driver is None:
             self._suppress_logging()
-            from hypium import UiDriver
+            _BY, UiDriver = _import_hypium()
             report_path = tempfile.mkdtemp(prefix="hypium_report_")
             if self.device:
                 self._driver = UiDriver.connect(device_sn=self.device, report_path=report_path)
@@ -845,7 +856,7 @@ class HypiumEngine:
                       index: Optional[int] = None,
                       fresh_before: bool = False,
                       auto_recover: bool = True) -> bool:
-        from hypium import BY
+        BY, _UiDriver = _import_hypium()
         desc = operation or f"点击文本为 '{text}' 的控件"
         if index is not None:
             # 指定索引：直接 dump 控件树按文本匹配列表取第 N 个坐标点击
@@ -941,7 +952,7 @@ class HypiumEngine:
                                    auto_recover=auto_recover):
             return True
         # 回退到 BY.key（组件设了 .key() 时可精确命中并触发断言）
-        from hypium import BY
+        BY, _UiDriver = _import_hypium()
         return self._execute_hypium_and_compare(
             lambda: self._get_driver().touch(BY.key(key)), desc,
             expectations=expectations, skip_before=skip_before,

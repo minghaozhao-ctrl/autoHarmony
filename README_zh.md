@@ -224,6 +224,7 @@ mkdir -p ~/.config/opencode/skills/autoharmony && cp autoHarmony/SKILL.md ~/.con
 - Python 3.9+
 - `hdc`（HarmonyOS Device Connector）在 PATH 中
 - 一台 HarmonyOS 设备（USB 或网络连接）
+- 可选：`pip install autoharmony[semantic]` — 语义化命令（`click-by-text` / `click-by-id` 等）依赖 `hypium`
 
 ## 贡献
 

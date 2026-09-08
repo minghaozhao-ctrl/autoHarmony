@@ -229,6 +229,7 @@ Per-client setup, config snippets, and the explore → record → replay loop:
 - Python 3.9+
 - `hdc` (HarmonyOS Device Connector) in PATH
 - A HarmonyOS device over USB or network
+- Optional: `pip install autoharmony[semantic]` — semantic commands like `click-by-text` / `click-by-id` need `hypium`
 
 ## Contributing
 
