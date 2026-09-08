@@ -213,6 +213,7 @@ cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc           # Cursor
 cp autoHarmony/SKILL.md AGENTS.md                                # Copilot / Codex / Goose
 cp autoHarmony/SKILL.md .windsurfrules                           # Windsurf
 cp autoHarmony/SKILL.md .clinerules                              # Cline
+mkdir -p ~/.config/opencode/skills/autoharmony && cp autoHarmony/SKILL.md ~/.config/opencode/skills/autoharmony/SKILL.md   # opencode
 ```
 
 各客户端的配置细节、片段、探索 → 录制 → 重放循环：

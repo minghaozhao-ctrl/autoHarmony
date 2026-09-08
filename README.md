@@ -218,6 +218,7 @@ cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc                          #
 cp autoHarmony/SKILL.md AGENTS.md                                               # Copilot / Codex / Goose
 cp autoHarmony/SKILL.md .windsurfrules                                          # Windsurf
 cp autoHarmony/SKILL.md .clinerules                                             # Cline
+mkdir -p ~/.config/opencode/skills/autoharmony && cp autoHarmony/SKILL.md ~/.config/opencode/skills/autoharmony/SKILL.md   # opencode
 ```
 
 Per-client setup, config snippets, and the explore → record → replay loop:

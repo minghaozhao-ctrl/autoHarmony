@@ -20,6 +20,7 @@ hdc list targets          # device must be visible
 | [Windsurf](windsurf.md) | `.windsurfrules` | [→](windsurf.md) |
 | [Cline](cline.md) | `.clinerules` | [→](cline.md) |
 | [Goose](goose.md) | `AGENTS.md` | [→](goose.md) |
+| [opencode](opencode.md) | `~/.config/opencode/skills/autoharmony/` | [→](opencode.md) |
 
 ## The loop every agent should follow
 
