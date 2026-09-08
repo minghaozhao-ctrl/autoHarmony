@@ -1,0 +1,81 @@
+autoharmony.py
+  9477533bb6d973e5 175-177
+engines/engines.py
+  9477533bb6d973e5 450,853-860,877-878,883,887-888,1091,1093,1431-1447,1453-1455,1457-1464,1466-1467,1469-1497,1501
+engines/verdict.py
+  9477533bb6d973e5 288-290,406
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "eba006cd24e55924a649bf8481c9becc83d43929",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 84,
+      "total_deletions": 12,
+      "accepted_lines": 87,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 89,
+    "git_diff_deleted_lines": 17,
+    "ai_additions": 83,
+    "ai_accepted": 83,
+    "BYMC": 5,
+    "mixed_additions": 0,
+    "BYAC": 83,
+    "BYRC": 0,
+    "per_file": {
+      "autoharmony.py": {
+        "BYMC": [],
+        "BYAC": [
+          "175-177"
+        ],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [],
+        "BYAC": [
+          "450",
+          "853-860",
+          "877-878",
+          "883",
+          "887-888",
+          "1091",
+          "1093",
+          "1431-1447",
+          "1453-1455",
+          "1457-1464",
+          "1466-1467",
+          "1469-1497",
+          "1501"
+        ],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "97",
+          "104",
+          "227",
+          "385",
+          "447"
+        ],
+        "BYAC": [
+          "288-290",
+          "406"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788835509,
+  "requirement_id": ""
+}
