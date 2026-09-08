@@ -1,0 +1,44 @@
+SKILL.md
+  9477533bb6d973e5 93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "be6459adb20b17e89c4ac86bcb42a9468b7a43a8",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 2,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 1,
+    "git_diff_deleted_lines": 2,
+    "ai_additions": 1,
+    "ai_accepted": 1,
+    "BYMC": 0,
+    "mixed_additions": 0,
+    "BYAC": 1,
+    "BYRC": 0,
+    "per_file": {
+      "SKILL.md": {
+        "BYMC": [],
+        "BYAC": [
+          "93"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788832420,
+  "requirement_id": ""
+}
