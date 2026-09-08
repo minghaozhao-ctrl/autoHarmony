@@ -1,0 +1,84 @@
+engines/engines.py
+  9477533bb6d973e5 746,955
+README.md
+  9477533bb6d973e5 232
+pyproject.toml
+  9477533bb6d973e5 24-26
+README_zh.md
+  9477533bb6d973e5 227
+requirements.txt
+  9477533bb6d973e5 2-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.3",
+  "base_commit_sha": "a3254f1ec046db25899c4e5682153793ea4f6700",
+  "prompts": {
+    "9477533bb6d973e5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f854c4cf2ffeJq2km8IAH9wHQ0",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 2,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 22,
+    "git_diff_deleted_lines": 3,
+    "ai_additions": 10,
+    "ai_accepted": 10,
+    "BYMC": 12,
+    "mixed_additions": 0,
+    "BYAC": 10,
+    "BYRC": 0,
+    "per_file": {
+      "README.md": {
+        "BYMC": [],
+        "BYAC": [
+          "232"
+        ],
+        "BYRC": []
+      },
+      "README_zh.md": {
+        "BYMC": [],
+        "BYAC": [
+          "227"
+        ],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [
+          "26-36",
+          "859"
+        ],
+        "BYAC": [
+          "746",
+          "955"
+        ],
+        "BYRC": []
+      },
+      "pyproject.toml": {
+        "BYMC": [],
+        "BYAC": [
+          "24-26"
+        ],
+        "BYRC": []
+      },
+      "requirements.txt": {
+        "BYMC": [],
+        "BYAC": [
+          "2-4"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1788833915,
+  "requirement_id": ""
+}
