@@ -1493,7 +1493,9 @@ class BatchRunner:
             uses_coord = any(s['action'] in self.COORD_ACTIONS for s in steps)
             self._ensure_engine('hdc' if uses_coord else 'hypium')
             return {'name': '录制脚本自动回放', 'steps': steps}
-        self._ensure_engine(self.engine_type)
+        steps = script.get('steps', [])
+        uses_coord = any(s.get('action') in self.COORD_ACTIONS for s in steps)
+        self._ensure_engine('hdc' if uses_coord else self.engine_type)
         return script
 
     def run(self, script: dict) -> dict:
@@ -1592,6 +1594,7 @@ class BatchRunner:
                     params['x1'], params['y1'], params['x2'], params['y2'], **kw),
                 'text_input': lambda: e.text_input(params['text'], **kw),
                 'key_back': lambda: e.key_back(**kw),
+                'go_back': lambda: e.key_back(**kw),
             }
 
         if action not in dispatch:
