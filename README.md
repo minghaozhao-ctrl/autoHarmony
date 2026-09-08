@@ -77,6 +77,7 @@ Two different questions need two different answers.
 | **Re-run after code change** | `script run test.json` | Re-run library code | Full rebuild + runner |
 | **Agent-readable output** | `--json` verdict, exit 0/1 | Human report | Human report |
 | **Exploration → regression** | Built-in recorder | No | No |
+| **Dual-engine auto-switch** | Coordinates ↔ semantic auto-detect | — | — |
 | **Crash detection** | Built-in | — | — |
 | **Auto dialog handling** | Built-in | — | — |
 | **Business-layer bridge** | JSON-RPC | — | — |
@@ -107,15 +108,20 @@ We're not here to replace Hypium either — it's a solid library. We're here for
 - **`--json` on everything** — agents parse verdicts directly, zero regex.
 - **Auto diff reports** — every action snapshots the widget tree before/after, so the agent sees exactly what changed (route shifts, dialogs, toggled text).
 - **Script recorder** — exploration becomes a replayable regression script. This is the whole point.
-- **Verdict layer** — crash, stuck-dialog, and route-change auto-detected, summarized in one line:
+- **Dual-engine auto-switch** — recording captures both coordinate (`ui click X Y`) and semantic (`ui click-by-text "登录"`) actions. Replay auto-detects the action type and routes to the correct engine (Hdc for coordinates, Hypium for semantic selectors) — no manual engine selection needed.
+- **Two-layer click fallback** — `click-by-text` first tries Hypium's precise `BY.text()` match; if the element isn't in the accessibility tree (e.g. dynamic labels, icons with only description), it automatically falls back to dumping the full widget tree, fuzzy-matching the text, and clicking by coordinates. Assertions are preserved through both paths.
+- **Assert polling** — `--expect-text "成功" --timeout 10` polls the widget tree for up to N seconds after the action, so timing-sensitive verifications don't flake.
+- **Verdict layer** — crash, stuck-dialog, route-change, and ineffective-action auto-detected, summarized in one line:
   ```
   ACTION_VERDICT: SUCCESS          | reason=route changed to LoginPage
   ACTION_VERDICT: BLOCKED_BY_DIALOG| reason=dialog '确认' detected
   ACTION_VERDICT: CRASHED          | reason=process died after action
+  ACTION_VERDICT: BACK_INEFFECTIVE | reason=page unchanged after back (at stack bottom)
+  ACTION_VERDICT: RESTARTED        | reason=accessibilityId dropped, app restarted
   ```
 - **Auto dialog handling** — `ui dismiss-dialogs` / `--auto-handle-dialog` recognize and clear permission/upgrade/overlay popups so the flow never gets stuck.
 - **Smart scroll-find** — `ui scroll-find "text"` scrolls until the target appears — no fragile coordinates, no manual swipes.
-- **Widget tree inspector** — `tree dump`, `tree search`, `tree diff`, `tree auto`. DevTools for your app.
+- **Widget tree inspector** — `tree dump`, `tree show`, `tree diff`, `tree auto`. DevTools for your app.
 - **Crash detector** — CppCrash / JSCrash / AppFreeze caught automatically after actions.
 - **Bridge framework** — agents can call app-side business methods over JSON-RPC.
 

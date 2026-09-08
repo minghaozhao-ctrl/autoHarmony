@@ -74,6 +74,7 @@ autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
 | **代码变更后重跑** | `script run test.json` | 重跑库代码 | 全量重建 + runner |
 | **Agent 可读输出** | `--json` verdict，exit 0/1 | 人看的报告 | 人看的报告 |
 | **探索 → 回归** | 内置录制 | 无 | 无 |
+| **双引擎自动切换** | 坐标 ↔ 语义自动识别 | — | — |
 | **崩溃检测** | 内置 | — | — |
 | **弹窗自动处理** | 内置 | — | — |
 | **业务层 Bridge** | JSON-RPC | — | — |
@@ -104,15 +105,20 @@ autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
 - **全命令 `--json`** — Agent 直接解析 verdict，不用正则。
 - **自动 diff 报告** — 每个操作自动快照控件树前后状态，Agent 看到到底变了啥（路由跳转、弹窗、文字切换）。
 - **脚本录制** — 探索变成可重放的回归脚本。这是整个工具的意义所在。
-- **裁决层** — 崩溃、弹窗卡死、路由变化自动识别，一行总结：
+- **双引擎自动切换** — 录制同时捕获坐标操作（`ui click X Y`）和语义操作（`ui click-by-text "登录"`）。回放时自动识别动作类型，路由到对应引擎（坐标→Hdc，语义→Hypium），无需手动指定。
+- **两层点击兜底** — `click-by-text` 先用 Hypium `BY.text()` 精确匹配；如果目标不在无障碍树里（动态文本、纯图标描述），自动回退到完整控件树模糊搜索 → 坐标点击。断言在两条路径上均保留。
+- **断言轮询** — `--expect-text "成功" --timeout 10` 在操作后持续轮询控件树最长 N 秒，时序敏感的断言不再 flake。
+- **裁决层** — 崩溃、弹窗卡死、路由变化、操作无效自动识别，一行总结：
   ```
   ACTION_VERDICT: SUCCESS           | reason=route changed to LoginPage
   ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=dialog '确认' detected
   ACTION_VERDICT: CRASHED           | reason=process died after action
+  ACTION_VERDICT: BACK_INEFFECTIVE  | reason=page unchanged after back (at stack bottom)
+  ACTION_VERDICT: RESTARTED         | reason=accessibilityId dropped, app restarted
   ```
 - **弹窗自动处理** — `ui dismiss-dialogs` / `--auto-handle-dialog` 识别并点掉权限/升级/覆盖层弹窗，流程永远不被卡住。
 - **智能滚动查找** — `ui scroll-find "text"` 自动往下滚到目标出现，不需要脆弱坐标，不需要手写滑动。
-- **控件树检查器** — `tree dump`、`tree diff`、`tree auto`。给你的 App 配的 DevTools。
+- **控件树检查器** — `tree dump`、`tree show`、`tree diff`、`tree auto`。给你的 App 配的 DevTools。
 - **崩溃检测** — 自动抓 CppCrash / JSCrash / AppFreeze。
 - **Bridge 框架** — Agent 通过 JSON-RPC 调 App 业务方法。
 
