@@ -519,6 +519,43 @@ class HdcUITestEngine:
         self.diff = WidgetTreeDiff()
         self.crash_detector = CrashDetector(device=device)
         self._cached_route = None
+        self._driver = None
+
+    @staticmethod
+    def _suppress_logging():
+        import logging
+        sys.log_mode = "no_console"
+        logging.disable(logging.INFO)
+
+    def _get_driver(self):
+        """懒加载 hypium daemon driver（复用持久连接，避免每次重拉 uitest 进程）
+
+        用于 dump 控件树的快路径：连接一次性（约 2~5s），之后每次 dump 约 0.7s，
+        对比 hdc uitest dumpLayout 的每次 ~5s，快约 7 倍。获取失败返回 None（回退慢路径）。
+        """
+        if self._driver is not None:
+            return self._driver
+        try:
+            self._suppress_logging()
+            from hypium import UiDriver
+            report_path = tempfile.mkdtemp(prefix="hdc_hypium_report_")
+            if self.device:
+                self._driver = UiDriver.connect(device_sn=self.device, report_path=report_path)
+            else:
+                self._driver = UiDriver.connect(report_path=report_path)
+            return self._driver
+        except Exception:
+            self._driver = None
+            return None
+
+    def close(self):
+        """断开 hypium daemon driver 连接"""
+        if self._driver is not None:
+            try:
+                self._driver.close()
+            except Exception:
+                pass
+            self._driver = None
 
     def _hdc_cmd(self, cmd_parts: List[str], timeout: int = 30) -> tuple:
         """执行 hdc 命令"""
@@ -531,11 +568,31 @@ class HdcUITestEngine:
     def _dump_and_load(self, tag: str = "layout") -> Optional[WidgetTreeAnalyzer]:
         """从设备获取控件树并加载
 
-        dumpLayout 失败时自动检测闪退。
+        优先走 hypium daemon 快路径（连接后每次 dump 约 0.7s），失败时回退到
+        hdc uitest dumpLayout 慢路径（约 5s），再失败则自动检测闪退。
 
         Returns:
             加载成功的 WidgetTreeAnalyzer，失败返回 None
         """
+        # 快路径：复用 daemon dump
+        driver = self._get_driver()
+        if driver is not None:
+            tmp_path = os.path.join(
+                tempfile.gettempdir(),
+                f'hdc_hypium_{tag}_{int(time.time() * 1000000)}.json')
+            try:
+                driver.UiTree.dump_to_file(tmp_path)
+                if os.path.getsize(tmp_path) > 0:
+                    analyzer = WidgetTreeAnalyzer(
+                        json_file=tmp_path, device=self.device)
+                    analyzer._temp_file = tmp_path
+                    if analyzer.load_tree():
+                        return analyzer
+                    analyzer.cleanup()
+            except Exception:
+                pass
+
+        # 慢路径回退：hdc uitest dumpLayout
         analyzer = WidgetTreeAnalyzer(
             json_file=f"auto_{tag}.json",
             device=self.device
@@ -616,7 +673,8 @@ class HdcUITestEngine:
                                  skip_before: bool = False,
                                  fresh_before: bool = False,
                                  auto_recover: bool = True,
-                                 is_back: bool = False) -> bool:
+                                 is_back: bool = False,
+                                 check_exit: bool = False) -> bool:
         """通用流程：前置快照 → 执行 HDC uiInput 操作 → 统一裁决管线
 
         Args:
@@ -643,7 +701,8 @@ class HdcUITestEngine:
 
         pipeline = ActionPipeline(self, auto_recover=auto_recover)
         return pipeline.run(action_fn, desc, expectations=expectations,
-                            is_back=is_back, skip_before=skip_before,
+                            is_back=is_back, check_exit=check_exit,
+                            skip_before=skip_before,
                             fresh_before=fresh_before)
 
     def click(self, x: int, y: int, operation: str = "",
@@ -705,13 +764,13 @@ class HdcUITestEngine:
                  expectations: Optional[dict] = None,
                  skip_before: bool = False, fresh_before: bool = False,
                  auto_recover: bool = True) -> bool:
-        """返回键并比较变化（无变化标记 BACK_INEFFECTIVE）"""
+        """返回键并比较变化（无变化标记 BACK_INEFFECTIVE；已在桌面时不执行返回）"""
         desc = operation or "按下返回键"
         return self._execute_hdc_and_compare(
             ["keyEvent", "Back"], desc, "返回键",
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover,
-            is_back=True)
+            is_back=True, check_exit=True)
 
 
 class HypiumEngine:
@@ -1498,8 +1557,158 @@ class BatchRunner:
         self._ensure_engine('hdc' if uses_coord else self.engine_type)
         return script
 
+    def _ensure_start_state(self, start: Optional[dict]) -> Optional[str]:
+        """回放前置状态校验 + 恢复（脚本可选 start/setup 字段）
+
+        支持字段：
+            start:
+              route: str | [str]   期望路由（字符串=栈中任一层包含该页名；列表=栈末尾连续匹配）
+              text: [str]          期望当前页存在的文本（全部命中）
+              max_backs: int       校验失败时允许的有界返回次数（默认 3）
+              recover: str | dict  恢复策略：'back'（默认，有限次返回）或
+                                    {'navigate': '<page>'}（bridge 导航直达）
+
+        Returns:
+            None 表示前置状态就绪；否则返回失败原因字符串。
+        """
+        if not start:
+            return None
+        from engines.diff_engine import WidgetTreeDiff
+        route = start.get('route')
+        texts = start.get('text') or []
+        if isinstance(texts, str):
+            texts = [texts]
+        max_backs = int(start.get('max_backs', 3))
+        recover = start.get('recover', 'back')
+
+        def _check() -> Optional[str]:
+            """当前页是否满足前置条件：满足返回 None，否则返回原因"""
+            route_reason = self._check_route(route)
+            if route_reason:
+                return route_reason
+            return self._check_texts(texts)
+
+        reason = _check()
+        if reason is None:
+            return None
+
+# 校验失败 → 按策略恢复
+        if isinstance(recover, dict) and recover.get('navigate'):
+            page = recover['navigate']
+            bundle = recover.get('bundle') or start.get(
+                'bundle', 'com.cmcc.DigitalHome')
+            ability = recover.get('ability') or start.get('ability', 'EntryAbility')
+            print(f"🔧 前置状态不匹配（{reason}），尝试 bridge 导航到 {page} ...")
+            try:
+                from utils.hdc import detect_device_id
+                import sys as _sys
+                _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from bridge.tcp_bridge import TcpBridge
+                dev = self.device or detect_device_id()
+                b = TcpBridge(device=dev)
+                try:
+                    r = b.call('navigate', {'route': page})
+                finally:
+                    b.close()
+                if (r or {}).get('success'):
+                    time.sleep(1)
+                    if _check() is None:
+                        self._refresh_history()
+                        print("✅ 已导航到前置页面")
+                        return None
+                return f"导航到 {page} 后仍不满足前置条件"
+            except Exception as nav_ex:
+                # 导航连接失败（App 未运行常触发）→ 先 aa start 启动再重试一次
+                print(f"ℹ️  bridge 导航失败: {nav_ex}，尝试先启动应用 {bundle} ...")
+                import subprocess
+                hdc_cmd = ["hdc"]
+                if self.device:
+                    hdc_cmd.extend(["-t", self.device])
+                hdc_cmd.extend(["shell", "aa", "start", "-b", bundle,
+                                "-a", ability])
+                try:
+                    subprocess.run(hdc_cmd, capture_output=True, text=True,
+                                   timeout=30)
+                except Exception as start_ex:
+                    return f"应用启动失败: {start_ex}"
+                time.sleep(3)
+                try:
+                    b = TcpBridge(device=dev)
+                    try:
+                        r = b.call('navigate', {'route': page})
+                    finally:
+                        b.close()
+                    if (r or {}).get('success'):
+                        time.sleep(1)
+                        if _check() is None:
+                            self._refresh_history()
+                            print("✅ 已启动并导航到前置页面")
+                            return None
+                        return f"启动后导航到 {page} 仍不满足前置条件"
+                    return f"启动后导航到 {page} 失败"
+                except Exception as retry_ex:
+                    # 启动后仍无 bridge（应用未内置 TCP server）→ 回退到有界返回
+                    print(f"ℹ️  启动后 bridge 仍不可用: {retry_ex}，回退到有界返回恢复")
+                    return self._recover_by_back(start, texts, route, max_backs,
+                                                 reason)
+        return self._recover_by_back(start, texts, route, max_backs, reason)
+
+    def _check_route(self, route) -> Optional[str]:
+        """校验当前路由是否满足前置 route 条件；满足返回 None，否则返回原因"""
+        if not route:
+            return None
+        from engines.diff_engine import WidgetTreeDiff
+        cur = WidgetTreeDiff.get_current_route(self.device)
+        if not cur:
+            return f"获取路由失败，期望含 '{route}'"
+        if isinstance(route, str):
+            if route not in cur:
+                return f"当前路由 {cur} 不包含 '{route}'"
+        else:
+            if list(cur)[-len(route):] != list(route):
+                return f"当前路由 {cur} 末尾不匹配 {route}"
+        return None
+
+    def _check_texts(self, texts) -> Optional[str]:
+        """校验当前页是否包含全部前置文本；满足返回 None，否则返回原因"""
+        if not texts:
+            return None
+        a = self.engine._dump_and_load("start_check")
+        if a is None:
+            return "获取控件树失败，无法校验前置文本"
+        try:
+            missing = [t for t in texts
+                       if not any(t in (w.get('text', '') or '')
+                                  for w in a.widgets)]
+        finally:
+            a.cleanup()
+        if missing:
+            return f"当前页缺少文本: {', '.join(missing)}"
+        return None
+
+    def _recover_by_back(self, start, texts, route, max_backs, reason):
+        """有界返回恢复：受 ActionPipeline 桌面护栏保护，到桌面即停"""
+        print(f"🔧 前置状态不匹配（{reason}），尝试有界返回恢复（最多 {max_backs} 次）...")
+        attempts = 0
+        for i in range(max_backs):
+            attempts = i + 1
+            backed = self._execute_step(
+                'go_back', {}, f"前置恢复返回[{i + 1}]", {}, skip_before=False)
+            if not backed:
+                print(f"↩️ 返回被拦截（桌面护栏/栈底），停止恢复")
+                break
+            if self._check_texts(texts) is None:
+                self._refresh_history()
+                print(f"✅ 返回 {i + 1} 次后到达前置页面")
+                return None
+        return f"前置状态校验失败（已尝试 {attempts} 次返回恢复）: {reason}"
+
     def run(self, script: dict) -> dict:
-        """执行脚本，返回结果摘要"""
+        """执行脚本，返回结果摘要
+
+        支持脚本顶层可选字段 start/setup（前置状态校验与恢复），见
+        _ensure_start_state 文档。
+        """
         script = self._normalize_script(script)
         name = script.get('name', '未命名脚本')
         steps = script.get('steps', [])
@@ -1509,6 +1718,26 @@ class BatchRunner:
         print(f"{'#' * 60}\n")
 
         all_passed = True
+
+        # 前置状态校验（脚本可选 start/setup 字段）失败 → 整脚本判定失败
+        start_state = script.get('start') or script.get('setup')
+        if start_state:
+            start_reason = self._ensure_start_state(start_state)
+            if start_reason:
+                print(f"\n❌ 前置状态校验失败: {start_reason}")
+                print("ACTION_VERDICT: PRECONDITION_FAILED | "
+                      f"reason={start_reason}")
+                self.results.append((f"前置状态校验确认失败: {start_reason}", False))
+                self._print_summary(name)
+                if hasattr(self.engine, 'close'):
+                    self.engine.close()
+                return {
+                    'name': name,
+                    'total': len(self.results),
+                    'passed': 0,
+                    'failed': len(self.results),
+                    'all_passed': False,
+                }
         for i, step in enumerate(steps, 1):
             step_desc = step.get('desc', f"步骤 {i}")
             action = step.get('action')

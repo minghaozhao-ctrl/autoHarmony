@@ -76,6 +76,35 @@ class Verdict:
         print(f"{icon} {self.line()}")
 
 
+# ==================== 桌面/应用内识别（供返回护栏共用） ====================
+
+# 系统 UI bundle（桌面/状态栏/锁屏等），widget 树中仅含这些 bundle 时视为已退到桌面
+SYSTEM_UI_BUNDLES = {
+    'com.ohos.sceneboard',  # HarmonyOS 桌面（SCBDesktop）
+    'com.ohos.settings',
+    'com.ohos.note',
+    'com.huawei.hmos.settings',
+    'com.huawei.hmos.launcher',
+    'com.huawei.hmos.sceneboard',
+}
+
+
+def widgets_have_app_content(widgets: List[dict]) -> bool:
+    """判断控件树是否包含 App 自身内容（非系统 UI bundle）。
+
+    返回 True 表示仍在 App 内（存在非系统 bundle 的控件）；
+    返回 False 表示已退到桌面/系统界面（仅剩系统 UI bundle 或 bubdle 信息缺失）。
+    """
+    if not widgets:
+        return False
+    for w in widgets:
+        attrs = w.get('attributes') or {}
+        bundle = (attrs.get('bundleName') or '').strip()
+        if bundle and bundle not in SYSTEM_UI_BUNDLES:
+            return True
+    return False
+
+
 # ==================== 弹窗识别（供裁决与自愈共用） ====================
 
 # 常见确认按钮（自愈点击用，正向优先）
@@ -307,6 +336,20 @@ class ActionPipeline:
         e.crash_detector.prime_baseline()
         if before_widgets:
             e.crash_detector.record_acc(before_widgets)
+
+        # 2.5 back 护栏：返回动作执行前已在桌面 → 不执行返回，防止一路退到桌面
+        if is_back and before_widgets is not None \
+                and not widgets_have_app_content(before_widgets):
+            verdict = Verdict(
+                VerdictStatus.BACK_INEFFECTIVE,
+                reason="已在桌面/系统界面，停止返回（bundle: "
+                       + ", ".join(sorted({(w.get('attributes') or {}).get('bundleName', '')
+                                           for w in before_widgets
+                                           if (w.get('attributes') or {}).get('bundleName')}))
+                       + ")",
+                suggestion="当前已无 App 内容，如需回到 App 请用 app navigate 或 aa start 启动")
+            verdict.print()
+            return False
 
         # 3. 执行动作
         try:

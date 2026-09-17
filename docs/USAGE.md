@@ -199,6 +199,34 @@ Run it:
 python3 autoharmony.py script run login_test.json
 ```
 
+### 回放前置状态校验（start/setup）
+
+默认回放只按步骤执行，若脚本录制起点要求特定页面，可通过顶层 `start`（或 `setup`）字段声明，回放前自动校验并在不满足时恢复：
+
+```json
+{
+  "name": "登录流程",
+  "start": {
+    "text": ["登录", "手机号"],
+    "route": "MainPage",
+    "max_backs": 3,
+    "recover": {"navigate": "MainPage", "bundle": "com.cmcc.DigitalHome"}
+  },
+  "steps": [
+    {"action": "click_by_text", "params": {"text": "确认登录"}, "desc": "确认登录"}
+  ]
+}
+```
+
+字段说明：
+- `text: [str]`：期望当前页存在的文本（全部命中才算通过；校验失败会做有界返回恢复）。
+- `route: str | [str]`：期望路由（字符串=路由栈任一层包含；列表=栈末尾连续匹配）。依赖 App 内置 TCP bridge。
+- `max_backs: int`：校验失败时允许的有界返回次数（默认 3）。返回受**桌面护栏**保护——widget 树中已无 App 内容（仅剩 `com.ohos.sceneboard` 等系统 bundle）即停止，避免一路退到桌面。
+- `recover`：恢复策略。默认 `"back"` 有限次返回；`{"navigate": "MainPage"}` 通过 bridge 直达，bridge 连接失败（App 未运行）会自动 `aa start` 启动后重试；仍失败则回退到有界返回。
+- 恢复仍失败 → 整脚本判定失败，输出 `ACTION_VERDICT: PRECONDITION_FAILED`，exit 1。
+
+单个 `ui back` 同样受桌面护栏约束：已在桌面时返回 `BACK_INEFFECTIVE`（reason=已在桌面/系统界面，停止返回），不再继续后退。
+
 ## Device Selection
 
 ```bash
