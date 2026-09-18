@@ -107,18 +107,22 @@ def widgets_have_app_content(widgets: List[dict]) -> bool:
 
 # ==================== 弹窗识别（供裁决与自愈共用） ====================
 
-# 常见确认按钮（自愈点击用，正向优先）
-DISMISS_BUTTONS = [
-    "同意", "允许", "仅在使用中允许", "知道了", "我知道了", "好的",
-    "确定", "继续", "立即开启", "去开启", "授权",
-    "跳过", "暂不", "稍后", "以后再说", "以后再說", "取消", "关闭", "暂不开启",
-]
+# 弹窗关闭按钮（**负向/跳过优先**，尽量无副作用关闭）；单一事实来源见
+# diff_engine.DIALOG_BUTTON_TEXTS。verdict 与 engines 均引用此表。
+DISMISS_BUTTONS = list(WidgetTreeDiff.DIALOG_BUTTON_TEXTS)
 
 
 def find_overlays(widgets: List[dict], screen_bounds=None) -> List[dict]:
     """当前控件树中的覆盖层（排除 Toast）"""
     return [ov for ov in WidgetTreeDiff.detect_overlays(widgets, screen_bounds)
             if 'toast' not in (ov.get('type', '') or '').lower()]
+
+
+def top_overlay(overlays: List[dict]) -> Optional[dict]:
+    """取视觉最上层的覆盖层（render_order 最大），而非数组末位"""
+    if not overlays:
+        return None
+    return max(overlays, key=lambda w: (w.get('render_order', 0) or 0))
 
 
 def overlay_summary(widgets: List[dict], overlay: dict, max_items: int = 6) -> str:
@@ -128,8 +132,82 @@ def overlay_summary(widgets: List[dict], overlay: dict, max_items: int = 6) -> s
     return " / ".join(texts[:max_items])
 
 
+def _clickable_target(widgets: List[dict], idx: int,
+                      overlay_idx: int) -> Optional[int]:
+    """把命中文本的控件解析为**可点击目标**：自身可点则用自身，否则沿
+    parent_index 上溯到最近的可点击祖先（须仍在 overlay 子树内，到 overlay
+    为止）。找不到返回 None。避免点到不可点的标题文本。"""
+    cur = idx
+    guard = 0
+    while cur is not None and guard < 60:
+        if not (0 <= cur < len(widgets)):
+            return None
+        w = widgets[cur]
+        if str(w.get('clickable', 'false')).lower() == 'true':
+            return cur
+        if cur == overlay_idx:
+            return None
+        cur = w.get('parent_index')
+        guard += 1
+    return None
+
+
+def _find_close_x_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
+    """找不到文本关闭按钮时的兜底：识别「右上角 X 关闭钮」。
+
+    很多自绘/活动弹窗的关闭钮是无文本的小按钮/图片（如“7天内不再展示”弹窗，
+    关闭 X 仅以 position/size 呈现）。启发式（限 overlay 子树内）：
+    可点击、无文本、尺寸 36~150px、中心位于容器右上角区域（右 22% 内 + 上 22% 内）
+    → 视为关闭钮，命中多个时取最贴右上角者。
+    """
+    from engines.engines import _is_descendant_index
+    ov_idx = next((i for i, w in enumerate(widgets) if w is overlay), None)
+    if ov_idx is None:
+        return None
+    ob = WidgetTreeDiff._parse_bounds(overlay.get('bounds', ''))
+    if not ob:
+        return None
+    ow, oh = ob[2] - ob[0], ob[3] - ob[1]
+    if ow <= 0 or oh <= 0:
+        return None
+    x_thr = ob[2] - ow * 0.22   # 右上角横向起点
+    y_thr = ob[1] + oh * 0.22   # 右上角纵向终点
+    best = None                 # (score, index)
+    for i, w in enumerate(widgets):
+        if i == ov_idx or not _is_descendant_index(widgets, i, ov_idx):
+            continue
+        if (w.get('text', '') or '').strip():
+            continue
+        if str(w.get('clickable', 'false')).lower() != 'true':
+            continue
+        b = WidgetTreeDiff._parse_bounds(w.get('bounds', ''))
+        if not b:
+            continue
+        bw, bh = b[2] - b[0], b[3] - b[1]
+        if not (36 <= bw <= 150 and 36 <= bh <= 150):
+            continue
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        if cx < x_thr or cy > y_thr:
+            continue
+        score = (cx - x_thr) + (y_thr - cy)   # 越大越贴右上角
+        if best is None or score > best[0]:
+            best = (score, i)
+    if best is None:
+        return None
+    w = dict(widgets[best[1]])  # 浅拷贝：带友好的关闭标签，供日志/建议显示
+    w['text'] = '关闭(X)'
+    return w
+
+
 def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
-    """在覆盖层后代中按优先级找可点击的确认按钮"""
+    """在覆盖层后代中按优先级（DISMISS_BUTTONS：负向/跳过优先）找**可点击**的关闭按钮。
+
+    规则：
+    1. 只认可点击目标（自身或最近可点击祖先），避免命中不可点的标题文本；
+    2. 按 DISMISS_BUTTONS 顺序匹配（负向在前）；
+    3. 同词多处命中时，优先 Button 类型、其次文本更短（更接近整串）；
+    4. 找不到文本按钮时，兜底识别右上角“X”关闭钮（见 _find_close_x_button）。
+    """
     from engines.engines import _is_descendant_index
     ov_idx = None
     for i, w in enumerate(widgets):
@@ -138,14 +216,56 @@ def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
             break
     if ov_idx is None:
         return None
+
     descendants = [i for i in range(len(widgets))
                    if i != ov_idx and _is_descendant_index(widgets, i, ov_idx)]
+
     for label in DISMISS_BUTTONS:
+        hits: List[int] = []
+        for i in descendants:
+            if label.lower() in (widgets[i].get('text', '') or '').lower():
+                tgt = _clickable_target(widgets, i, ov_idx)
+                if tgt is None or tgt in hits:
+                    continue
+                # 只认可 Button 类型的关闭按钮；toggle/复选框（如“不再提醒”）
+                # 点了只是勾选偏好、不会关弹窗，不当作关闭按钮 → 走返回键兜底
+                if (widgets[tgt].get('type', '') or '').lower() != 'button':
+                    continue
+                hits.append(tgt)
+        if hits:
+            def _rank(t: int):
+                w = widgets[t]
+                is_btn = 0 if (w.get('type', '') or '').lower() == 'button' else 1
+                return (is_btn, len((w.get('text', '') or '')), t)
+            best = sorted(hits, key=_rank)[0]
+            w = widgets[best]
+            txt = (w.get('text', '') or '').strip()
+            # 长文本的非按钮命中多半是标题/说明（如“不再提醒，可在…恢复”），
+            # 不该点它——视为未识别，继续找别的词（或返回 None）
+            if (w.get('type', '') or '').lower() != 'button' \
+                    and len(txt) > len(label) + 4:
+                continue
+            return w
+    # 固定 ID 关闭按钮：ArkUI 源码写死 .id() 的关闭钮（如通用运营弹窗
+    # AFCommonAlertView 的 dialog_cancel_btn）。比文本稳定、比 X 启发式可靠。
+    for fid in WidgetTreeDiff.CLOSE_BUTTON_IDS:
         for i in descendants:
             w = widgets[i]
-            if label.lower() in (w.get('text', '') or '').lower():
-                return w
-    return None
+            attrs = w.get('attributes') or {}
+            ids = {str(w.get('id', '') or '').strip(),
+                   str(attrs.get('id', '') or '').strip(),
+                   str(attrs.get('key', '') or '').strip()}
+            if fid not in ids:
+                continue
+            tgt = _clickable_target(widgets, i, ov_idx)
+            if tgt is None:
+                continue
+            cp = dict(widgets[tgt])          # 浅拷贝：带友好标签供日志/建议显示
+            if not (cp.get('text', '') or '').strip():
+                cp['text'] = '关闭(×)'
+            return cp
+    # 兜底：无文本关闭按钮时识别右上角 X 关闭钮
+    return _find_close_x_button(widgets, overlay)
 
 
 # ==================== 裁决决策树 ====================
@@ -201,7 +321,7 @@ def judge(crash_detector, after_analyzer, report,
         # 期望弹窗出现（--expect-dialog）时，弹窗出现即预期结果，不判阻挡
         if expectations and expectations.get('dialog'):
             return Verdict(VerdictStatus.SUCCESS, reason="弹窗已按预期出现")
-        top = overlays[-1]
+        top = top_overlay(overlays)
         summary = overlay_summary(widgets, top)
         btn = find_dismiss_button(widgets, top)
         suggestion = (f"点击弹窗按钮 '{btn.get('text', '')}' 关闭后重试"
@@ -245,6 +365,19 @@ class ActionPipeline:
     def __init__(self, engine, auto_recover: bool = True):
         self.engine = engine
         self.auto_recover = auto_recover
+
+    def _settle(self, timeout: float = 0.4):
+        """自适应 UI 稳定窗：**仅当 daemon 已连接**时用 wait_for_idle（动画/滚动
+        尽早静止即返回，实测空跑约 0.1s）；否则回退固定 sleep(timeout)。
+        注意：不能在此处新建 hypium 连接（约 2.3s），否则得不偿失。"""
+        drv = getattr(self.engine, "_driver", None)
+        if drv is not None and hasattr(drv, "wait_for_idle"):
+            try:
+                drv.wait_for_idle(idle_time=0.1, timeout=timeout)
+                return
+            except Exception:
+                pass
+        time.sleep(timeout)
 
     # ---- 前置快照（支持复用历史基准，省一次 dump）----
 
@@ -363,8 +496,8 @@ class ActionPipeline:
             return False
         print(f"✅ {desc} 执行完成")
 
-        # 4. Toast/动画稳定窗
-        time.sleep(0.4)
+        # 4. Toast/动画稳定窗（自适应，尽早静止）
+        self._settle(0.4)
 
         # 5. 后置快照 + 裁决（含一次自愈重试）
         verdict, after, report = self._verdict_once(
@@ -378,14 +511,14 @@ class ActionPipeline:
         if (verdict.status == VerdictStatus.BLOCKED_BY_DIALOG
                 and self.auto_recover):
             print("🔧 检测到弹窗阻挡，尝试自动清理并重试一次...")
-            auto_handle_dialogs(e.device)
+            auto_handle_dialogs(e.device, engine=e)
             try:
                 retry_ok = action_fn()
             except Exception as ex:
                 print(f"❌ 自愈重试异常: {ex}")
                 retry_ok = False
             if retry_ok:
-                time.sleep(0.4)
+                self._settle(0.4)
                 verdict, after, report = self._verdict_once(
                     before_widgets, before_route, before_sig,
                     f"{desc} [自愈重试]", is_back, check_exit, expectations)
@@ -466,6 +599,8 @@ class ActionPipeline:
                               VerdictStatus.BACK_INEFFECTIVE):
             if self._has_state_controls(after.widgets):
                 print("⏳ 检测到状态控件，1.5s 后复查是否异步生效...")
+                # 单次复查（异步更新场景需完整等待；早退轮询会多付一次 dump，
+                # 在无变化主路径上反而更慢，故维持单次检查）
                 time.sleep(1.5)
                 recheck = e._dump_and_load("recheck")
                 if recheck is not None:
@@ -477,7 +612,7 @@ class ActionPipeline:
                         verdict = judge(e.crash_detector, recheck, re_report,
                                         before_route, recheck_route,
                                         is_back=is_back,
-                                        looks_like_desktop=looks_desktop,
+                                        looks_like_desktop=looks_like_desktop,
                                         expectations=expectations)
                         after.cleanup()
                         return verdict, recheck, re_report

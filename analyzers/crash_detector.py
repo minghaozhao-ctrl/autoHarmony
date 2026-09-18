@@ -68,8 +68,14 @@ class CrashDetector:
 
     def _init_baseline(self):
         if self._baseline_app_alive is None:
-            self._baseline_app_alive = self._is_app_alive()
-            self._baseline_faultlog_count = self._count_faultlog_files()
+            alive, count = self._probe()
+            if alive is None:
+                # 合并探测失败 → 分别回退
+                self._baseline_app_alive = self._is_app_alive()
+                self._baseline_faultlog_count = self._count_faultlog_files()
+            else:
+                self._baseline_app_alive = alive
+                self._baseline_faultlog_count = count
 
     def prime_baseline(self) -> None:
         """主动建立基线
@@ -86,6 +92,33 @@ class CrashDetector:
         if not success:
             return 0
         return len([f for f in output.strip().split('\n') if f.strip()])
+
+    def _probe(self) -> tuple:
+        """一次性探测：App 进程存活 + faultlog 文件数。
+
+        每次 hdc 子进程调用有 ~0.35s 固定开销，把 pidof 与 ls 合并到一条
+        shell（用分隔符切分输出）可省一次调用（~0.35s/次检测）。
+
+        Returns:
+            (alive: Optional[bool], count: Optional[int])；失败返回 (None, None)
+        """
+        marker = "__HDC_PROBE_SPLIT__"
+        success, output = self._hdc_cmd(
+            ["shell",
+             f"pidof {self.bundle}; echo {marker}; "
+             f"ls /data/log/faultlog/faultlogger/"],
+            timeout=10,
+        )
+        if not success:
+            return None, None
+        if marker in output:
+            pid_part, _, ls_part = output.partition(marker)
+        else:
+            # 命令不支持合并时保守回退
+            return None, None
+        alive = bool(pid_part.strip())
+        count = len([f for f in ls_part.strip().split('\n') if f.strip()])
+        return alive, count
 
     @staticmethod
     def _extract_max_acc(widgets) -> int:
@@ -132,14 +165,17 @@ class CrashDetector:
         self._init_baseline()
         result = CrashCheckResult()
 
-        current_alive = self._is_app_alive()
+        current_alive, current_count = self._probe()
+        if current_alive is None:  # 合并探测失败 → 分别回退
+            current_alive = self._is_app_alive()
+            current_count = self._count_faultlog_files()
+
         if self._baseline_app_alive and not current_alive:
             result.crashed = True
             result.hidumper_records = [
                 f"App 进程 {self.bundle} 已退出（基线存活，当前不存在）"
             ]
 
-        current_count = self._count_faultlog_files()
         if current_count > self._baseline_faultlog_count:
             result.faultlog_files = [f"新增 {current_count - self._baseline_faultlog_count} 个文件"]
             result.crashed = True

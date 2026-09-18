@@ -15,6 +15,23 @@ from datetime import datetime
 
 # ==================== 变化类型定义 ====================
 
+# 进程级 TcpBridge 连接缓存：避免每次 get_current_route 都重建 fport+socket
+# （实测单次 ~0.07s，一次操作流程内查询 4~5 次）
+_ROUTE_BRIDGES: Dict[str, object] = {}
+# 负缓存：App 未内置 TCP bridge server 时 get_current_route 每次都抛异常，
+# 会触发 close+重建 fport（一次操 ~6 次，约 0.5s）。失败后 2s 内直接返回 None。
+_ROUTE_FAIL: Dict[str, float] = {}
+_ROUTE_FAIL_TTL = 2.0
+# 永久禁用：TcpBridge 无 get_current_route 方法（AttributeError，协议未实现）
+# 时，本进程内不再尝试，彻底消除 fport 抖动。
+_ROUTE_DISABLED: Dict[str, bool] = {}
+# pagePath 回退：app 前台时 `uitest dumpLayout` 的窗口节点自带 pagePath
+# （如 pages/LaunchPage）。dump 时登记，get_current_route 在 bridge 无果时
+# 直接返回，纯 hdc、零额外开销。
+_ROUTE_PAGE: Dict[str, tuple] = {}
+_ROUTE_PAGE_TTL = 15.0
+
+
 class ChangeType(Enum):
     ADDED = "新增"
     REMOVED = "消失"
@@ -90,7 +107,7 @@ class Change:
 class ChangeReport:
     """变化报告"""
 
-    def __init__(self, operation: str = ""):
+    def __init__(self, operation: str = "", compact: bool = True):
         self.operation = operation
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.changes: List[Change] = []
@@ -100,6 +117,7 @@ class ChangeReport:
         self.after_analyzer = None
         self.before_overlays: List[Dict] = []
         self.after_overlays: List[Dict] = []
+        self.compact = compact
 
     def add_change(self, change: Change):
         self.changes.append(change)
@@ -124,6 +142,8 @@ class ChangeReport:
         print()
         if self.route_changed:
             self._print_route_report()
+        elif self.compact:
+            self._print_compact_report()
         else:
             self._print_change_report()
         print()
@@ -158,6 +178,132 @@ class ChangeReport:
             print("  " + "=" * 80)
             self.after_analyzer.overview()
         print("PAGE_RESULT: ROUTE_CHANGED")
+
+    @staticmethod
+    def _uid(w):
+        return (w.get('attributes') or {}).get('uniqueId')
+
+    @staticmethod
+    def _sig_key(w):
+        t = (w.get('text') or '').strip() or (w.get('hint') or '').strip()
+        return (w.get('type', ''), w.get('bounds', ''), t)
+
+    @staticmethod
+    def _is_sig(w):
+        t = (w.get('text') or '').strip() or (w.get('hint') or '').strip()
+        if t:
+            return True
+        if str(w.get('checked') or '') in ('true', 'false') or w.get('selected') == 'true':
+            return True
+        return (w.get('type') or '').lower() in (
+            'toggle', 'switch', 'checkbox', 'radio', 'dialog', 'alertdialog', 'progress', 'tabbar')
+
+    def _print_compact_report(self):
+        print("=" * 74)
+        print(f"🧭 组件树变化  操作: {self.operation}  时间: {self.timestamp}")
+        print("=" * 74)
+
+        if not self.changes:
+            print("  ✅ 未检测到显著变化")
+            print("PAGE_RESULT: NO_CHANGES")
+            return
+
+        overlay_types = {ChangeType.OVERLAY_APPEARED, ChangeType.OVERLAY_DISAPPEARED}
+        occluded_types = {ChangeType.OCCLUDED}
+        revealed_types = {ChangeType.REVEALED}
+        detail_types = {ChangeType.TEXT_CHANGED, ChangeType.STATE_CHANGED, ChangeType.PROPERTY_CHANGED}
+
+        # 去重（同类型 + 同前/后签名视为重复，消除滚动/遮挡重复上报）
+        seen = set()
+        uniq = []
+        for c in self.changes:
+            sig = (c.type,
+                   self._sig_key(c.widget),
+                   self._sig_key(c.before) if c.before else None,
+                   self._sig_key(c.after) if c.after else None)
+            if sig not in seen:
+                seen.add(sig)
+                uniq.append(c)
+
+        added = [c for c in uniq if c.type == ChangeType.ADDED]
+        removed = [c for c in uniq if c.type == ChangeType.REMOVED]
+        pos = [c for c in uniq if c.type == ChangeType.POSITION_CHANGED]
+        txt_state = [c for c in uniq if c.type in detail_types]
+        overlay = [c for c in uniq if c.type in overlay_types]
+        occl = [c for c in uniq if c.type in occluded_types]
+        reve = [c for c in uniq if c.type in revealed_types]
+        other = [c for c in uniq if c.type not in (
+            ChangeType.ADDED, ChangeType.REMOVED, ChangeType.POSITION_CHANGED,
+            ChangeType.TEXT_CHANGED, ChangeType.STATE_CHANGED, ChangeType.PROPERTY_CHANGED,
+            *overlay_types, *occluded_types, *revealed_types)]
+
+        print(f"  📊 新增{len(added)} · 消失{len(removed)} · 位置变化{len(pos)} · "
+              f"文本/状态/属性{len(txt_state)} · 遮挡{len(occl)} · 解除遮挡{len(reve)} · 其它{len(other)}")
+        print()
+
+        LIMIT = 8
+
+        def _label(w):
+            t = (w.get('text') or '').strip() or (w.get('hint') or '').strip()
+            ty = w.get('type', '')
+            mark = f" checked={w.get('checked')}" if w.get('checked') in ('true', 'false') else ''
+            return f"{ty}{mark} {t!r}" if t else f"{ty}(无文本)"
+
+        sig_add = [c for c in added if self._is_sig(c.widget)]
+        print(f"● 新增({len(added)})  →  有信息量 {len(sig_add)} 条")
+        for c in sig_add[:LIMIT]:
+            print(f"    + {_label(c.widget)}  {c.widget.get('bounds', '')}")
+        folded = len(added) - min(len(sig_add), LIMIT)
+        if folded > 0:
+            print(f"    … 另 {folded} 条纯结构/无文本")
+        print()
+
+        # 消失：不给坐标
+        sig_rem = [c for c in removed if self._is_sig(c.widget)]
+        print(f"● 消失({len(removed)})  →  有信息量 {len(sig_rem)} 条")
+        for c in sig_rem[:LIMIT]:
+            print(f"    - {_label(c.widget)}")
+        folded = len(removed) - min(len(sig_rem), LIMIT)
+        if folded > 0:
+            print(f"    … 另 {folded} 条纯结构/无文本")
+        print()
+
+        if pos:
+            groups = defaultdict(list)
+            for c in pos:
+                bb = WidgetTreeDiff._parse_bounds(c.before.get('bounds', '')) if c.before else None
+                ab = WidgetTreeDiff._parse_bounds(c.after.get('bounds', '')) if c.after else None
+                if bb and ab:
+                    dx = round((ab[0] + ab[2]) / 2 - (bb[0] + bb[2]) / 2)
+                    dy = round((ab[1] + ab[3]) / 2 - (bb[1] + bb[3]) / 2)
+                    groups[(dx, dy)].append(c)
+                else:
+                    groups[(0, 0)].append(c)
+            print(f"● 位置变化({len(pos)})  →  合并 {len(groups)} 组同位移")
+            for (dx, dy), grp in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:10]:
+                s = self._uid(grp[0].widget)
+                print(f"    ▸ 位移({dx:+d},{dy:+d})px · {len(grp)} 节点 · 如 u={s} {grp[0].widget.get('type')}")
+            print()
+
+        if txt_state:
+            print(f"● 文本/状态/属性变化({len(txt_state)})")
+            for c in txt_state[:LIMIT]:
+                print(f"    · {_label(c.widget)}")
+                if c.type == ChangeType.TEXT_CHANGED and c.before and c.after:
+                    print(f"        \"{(c.before.get('text') or c.before.get('hint') or '')[:40]}\""
+                          f" → \"{(c.after.get('text') or c.after.get('hint') or '')[:40]}\"")
+                elif c.type == ChangeType.STATE_CHANGED and c.before and c.after:
+                    self._print_state_diff(c.before, c.after)
+            print()
+
+        if overlay:
+            print(f"● 覆盖层面板变化({len(overlay)})")
+        if occl or reve:
+            print(f"● 遮挡/解除({len(occl)}/{len(reve)})")
+        if other:
+            print(f"● 其它({len(other)})")
+
+        print("PAGE_RESULT: CHANGES_DETECTED")
 
     def _print_change_report(self):
         print("=" * 100)
@@ -378,6 +524,41 @@ class WidgetTreeDiff:
         'bottomsheet', 'sidebarm', 'toastdialog'
     }
 
+    # 纯布局/整页框架容器：本身绝不是弹窗/覆盖层，只有内含确认/取消类按钮时
+    # 才视为系统弹窗容器。用于避免整屏容器被误判为覆盖层，如页面根、软键盘
+    # 窗口 root、sceneboard 容器；以及 rcp 等自绘页面抛出的 Folder/Hover/
+    # ControlParts/BuilderProxyNode 结构容器（设备管控页实测会误报）。
+    CONTAINER_ONLY_TYPES = {
+        '', 'root', 'windowscene', 'stack', 'column', 'row', 'flex',
+        'relativecontainer', 'navigation', 'navigationcontent',
+        'navdestination', 'navdestinationcontent', 'scroll', 'list',
+        'grid', 'swiper', 'tabs', 'tabcontent', 'tabbar', 'blank',
+        'line', 'nodecontainer', '__common__',
+        # —— 自绘/框架整页容器（实测 rcp 设备页会抛出，非弹窗）——
+        'folder', 'hover', 'controlparts', 'controlpartsgroup',
+        'builderproxynode',
+    }
+
+    # 弹窗关闭按钮（单一事实来源；verdict.DISMISS_BUTTONS 与
+    # engines.AUTO_DIALOG_BUTTONS 均引用本表，勿再各自拷贝）。
+    # 顺序即优先级：**负向/跳过类在前**（尽量无副作用地关掉弹窗），
+    # 中性/正向类仅作兜底（弹窗只有正向按钮时才点）。
+    DIALOG_BUTTON_TEXTS = [
+        # —— 负向 / 跳过优先 ——
+        "取消", "关闭", "忽略", "跳过", "暂不", "暂不开启", "稍后",
+        "不再提醒", "拒绝", "不允许", "禁止", "以后再说", "暂不需要",
+        # —— 中性 / 正向兜底 ——
+        "同意", "允许", "仅在使用中允许", "确定", "继续", "好的",
+        "知道了", "我知道了", "立即开启", "去开启", "授权",
+    ]
+
+    # 固定 ID 的关闭按钮（ArkUI 源码写死 .id() 的弹窗关闭钮）。
+    # 比文本稳定（文本/资源多为服务端下发），比右上角 X 启发式可靠。
+    # 例：通用运营弹窗 AFCommonAlertView 的关闭钮 .id("dialog_cancel_btn")。
+    CLOSE_BUTTON_IDS = [
+        'dialog_cancel_btn',
+    ]
+
     OCCLUSION_RATIO_THRESHOLD = 0.7
     OVERLAY_COVERAGE_THRESHOLD = 0.8
 
@@ -464,6 +645,46 @@ class WidgetTreeDiff:
                 cur = widgets[cur].get('parent_index') if 0 <= cur < len(widgets) else None
             return False
 
+        def _has_readable_content(idx: int) -> bool:
+            """子树内是否有可读文本内容。
+
+            用于排除「整屏空壳」：自绘页面（rcp）常在最外层套一层透明的
+            Dialog/BuilderProxyNode/Image 包装容器，占满全屏却无任何文字，
+            并非真正弹窗（真正的弹窗必有标题/内容/按钮等文本）。这里只认
+            非空文本；纯透明可点层（全屏 clickable Image）不算内容。
+            """
+            for j in range(len(widgets)):
+                if j == idx:
+                    continue
+                if (widgets[j].get('text', '') or '').strip() \
+                        and _is_descendant_of(j, idx):
+                    return True
+            return False
+
+        def _is_webview_content(idx: int) -> bool:
+            """判断节点是否为内嵌 WebView（H5 页面）内容。
+
+            真实 H5 设备页在 ArkUI Web 组件下层层展开为
+            Web → rootWebArea → genericContainer（整屏、含页面文本），
+            结构上与“整屏弹窗”极难区分，但它们是内嵌网页而非弹窗。
+            判定规则：节点自身为 web，或沿 parent_index 上溯到 web/rootwebarea
+            祖先（H5 内容节点均为其子树）。只影响 branch1 的“整屏页面容器”
+            启发式；显式 dialog/sheet 等类型(branch2)保持原样，避免漏掉
+            WebView 内真正以 dialog 类型暴露的 JS 弹窗。
+            """
+            if widgets[idx].get('type', '').lower() in ('web', 'wwwview', 'webview'):
+                return True
+            cur = widgets[idx].get('parent_index')
+            seen = set()
+            while cur is not None and cur not in seen:
+                if cur < 0 or cur >= len(widgets):
+                    return False
+                seen.add(cur)
+                if widgets[cur].get('type', '').lower() in ('web', 'wwwview', 'webview', 'rootwebarea'):
+                    return True
+                cur = widgets[cur].get('parent_index')
+            return False
+
         overlays: List[Dict] = []
         picked_ids = set()
 
@@ -473,6 +694,29 @@ class WidgetTreeDiff:
                 continue
             if not _is_visible(w):
                 continue
+            # 内嵌 WebView（H5）页面内容不是弹窗：整屏的 Web/rootWebArea/
+            # genericContainer 是网页本身而非覆盖层，直接排除，避免设备页误报
+            # BLOCKED_BY_DIALOG（如 智能定位拐杖 设备 H5 页）。
+            if _is_webview_content(idx):
+                continue
+            # 纯布局容器（root/Stack/RelativeContainer/软键盘窗口等）本身不是弹窗：
+            # 只有内含明确确认/取消按钮时才认定为系统弹窗容器，避免整屏容器误报。
+            if (w.get('type', '') or '').lower() in \
+                    WidgetTreeDiff.CONTAINER_ONLY_TYPES:
+                has_dialog_btn = False
+                for j in range(len(widgets)):
+                    if j == idx or not _is_visible(widgets[j]):
+                        continue
+                    txt = (widgets[j].get('text', '') or '').lower()
+                    if not txt:
+                        continue
+                    if any(b.lower() in txt
+                           for b in WidgetTreeDiff.DIALOG_BUTTON_TEXTS) \
+                            and _is_descendant_of(j, idx):
+                        has_dialog_btn = True
+                        break
+                if not has_dialog_btn:
+                    continue
             if w.get('render_order', 0) > min_content_order:
                 if total_content > 0:
                     content_descendants = sum(
@@ -481,11 +725,15 @@ class WidgetTreeDiff:
                     )
                     if content_descendants / total_content > 0.5:
                         continue
+                # 整屏空壳排除：占满全屏却无可读内容的结构包装（自绘页面
+                # 外层 Dialog/BuilderProxyNode/Image 等）不是弹窗
+                if not _has_readable_content(idx):
+                    continue
                 w['_overlay_coverage'] = round(cov, 2)
                 overlays.append(w)
                 picked_ids.add(id(w))
 
-        for w in widgets:
+        for idx, w in enumerate(widgets):
             if id(w) in picked_ids:
                 continue
             wt = w.get('type', '').lower()
@@ -493,6 +741,9 @@ class WidgetTreeDiff:
             is_type_overlay = wt in WidgetTreeDiff.OVERLAY_TYPES
             is_modal = attrs.get('modal') == 'true' or attrs.get('isModal') == 'true'
             if (is_type_overlay or is_modal) and _is_visible(w):
+                # 显式 overlay 类型（Dialog/Sheet/Popup 等）无条件识别：自绘页面的
+                # 引导气泡常承载于透明的全屏 Dialog 壳内（其文本不暴露在控件树），
+                # 仍需作为覆盖层交由上层（返回键兜底等）处理，此处不做空壳排除。
                 w['_overlay_coverage'] = round(_coverage(w), 2)
                 overlays.append(w)
                 picked_ids.add(id(w))
@@ -563,9 +814,43 @@ class WidgetTreeDiff:
         return False
 
     @staticmethod
+    def record_page_path(device: Optional[str], page_path: Optional[str]) -> None:
+        """登记 dump 中提取到的当前页面 pagePath（供 get_current_route 回退）"""
+        if device and page_path:
+            import time as _time
+            _ROUTE_PAGE[device] = (page_path, _time.time())
+
+    @staticmethod
     def get_current_route(device: Optional[str] = None) -> Optional[List[str]]:
-        """获取当前路由栈（通过 TcpBridge 直连 App）"""
+        """获取当前路由/页面
+
+        优先 TcpBridge 直连 App 拿导航路由栈；bridge 不可用（App 未内置 TCP
+        server，即当前 TcpBridge 无 get_current_route 方法）时，回退到 dump 中
+        登记的 pagePath（如 ['pages/LaunchPage']）——纯 hdc、零额外开销。
+        两者都拿不到返回 None。
+        """
+        route = WidgetTreeDiff._get_current_route_bridge(device)
+        if route:
+            return route
+        dev = device
+        if dev:
+            import time as _time
+            ent = _ROUTE_PAGE.get(dev)
+            if ent and (_time.time() - ent[1]) < _ROUTE_PAGE_TTL:
+                return [ent[0]]
+        return None
+
+    @staticmethod
+    def _get_current_route_bridge(device: Optional[str] = None) -> Optional[List[str]]:
+        """通过 TcpBridge 获取路由栈（App 未内置 TCP server 时返回 None）
+
+        复用进程级 TcpBridge 连接（首次建连 ~0.07s，之后复用），连接失效时重建一次。
+        App 未内置 TCP bridge server 时会持续失败 → 负缓存 2s，避免同一操作流程内
+        反复 close+重建 fport（实测 ~6 次，约 0.5s）。
+        """
+        dev = None
         try:
+            import time as _time
             import sys
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from bridge.tcp_bridge import TcpBridge
@@ -573,12 +858,46 @@ class WidgetTreeDiff:
             dev = device or detect_device_id()
             if not dev:
                 return None
-            bridge = TcpBridge(device=dev)
+            # 负缓存命中：近期失败过，直接返回 None（不再建桥/拆 fport）
+            if _ROUTE_DISABLED.get(dev):
+                return None
+            # 协议未实现（TcpBridge 无 get_current_route）→ 直接禁用，免去首次建桥
+            if not hasattr(TcpBridge, 'get_current_route'):
+                _ROUTE_DISABLED[dev] = True
+                return None
+            fail_at = _ROUTE_FAIL.get(dev)
+            if fail_at is not None and (_time.time() - fail_at) < _ROUTE_FAIL_TTL:
+                return None
+            bridge = _ROUTE_BRIDGES.get(dev)
+            if bridge is None:
+                bridge = TcpBridge(device=dev)
+                _ROUTE_BRIDGES[dev] = bridge
             try:
                 return bridge.get_current_route()
-            finally:
-                bridge.close()
+            except AttributeError:
+                # TcpBridge 未实现该方法（协议未落地）→ 本进程永久禁用，避免抖动
+                _ROUTE_DISABLED[dev] = True
+                return None
+            except Exception:
+                # 连接可能已失效（App 重启/断连），重建一次再试
+                try:
+                    bridge.close()
+                except Exception:
+                    pass
+                try:
+                    bridge = TcpBridge(device=dev)
+                    _ROUTE_BRIDGES[dev] = bridge
+                    return bridge.get_current_route()
+                except Exception:
+                    _ROUTE_FAIL[dev] = _time.time()
+                    return None
         except Exception:
+            if dev:
+                try:
+                    import time as _time
+                    _ROUTE_FAIL[dev] = _time.time()
+                except Exception:
+                    pass
             return None
 
     def compare(self, before_widgets: List[Dict], after_widgets: List[Dict],
@@ -605,12 +924,36 @@ class WidgetTreeDiff:
         if overlay_changes:
             report.changes = overlay_changes + [c for c in report.changes if c not in overlay_changes]
 
-        before_by_id = self._build_id_index(before_widgets)
-        after_by_id = self._build_id_index(after_widgets)
-
         matched_pairs = []
         unmatched_before = set(range(len(before_widgets)))
         unmatched_after = set(range(len(after_widgets)))
+
+        # 最高优先级：按 uniqueId 稳定 ID 精确配对（全局唯一，不随层级/顺序变化）
+        before_by_uid: Dict[str, List[Dict]] = defaultdict(list)
+        after_by_uid: Dict[str, List[Dict]] = defaultdict(list)
+        for i, w in enumerate(before_widgets):
+            w['_index'] = i
+            uid = (w.get('attributes') or {}).get('uniqueId')
+            if uid:
+                before_by_uid[uid].append(w)
+        for i, w in enumerate(after_widgets):
+            w['_index'] = i
+            uid = (w.get('attributes') or {}).get('uniqueId')
+            if uid:
+                after_by_uid[uid].append(w)
+        for i in list(unmatched_before):
+            widget = before_widgets[i]
+            uid = (widget.get('attributes') or {}).get('uniqueId')
+            if uid and uid in after_by_uid:
+                cand = next((c for c in after_by_uid[uid]
+                             if c['_index'] in unmatched_after), None)
+                if cand is not None:
+                    matched_pairs.append((widget, cand, 1.0))
+                    unmatched_before.discard(i)
+                    unmatched_after.discard(cand['_index'])
+
+        before_by_id = self._build_id_index(before_widgets)
+        after_by_id = self._build_id_index(after_widgets)
 
         for i, widget in enumerate(before_widgets):
             widget_id = widget.get('id') or widget.get('accessibilityId')
@@ -693,6 +1036,11 @@ class WidgetTreeDiff:
 
     def _calculate_similarity(self, before: Dict, after: Dict) -> float:
         if before.get('type', '').lower() != after.get('type', '').lower():
+            return 0.0
+        # 双方都有 uniqueId 且不一致 → 必为不同节点，直接判 0，防止启发式误配
+        b_uid = (before.get('attributes') or {}).get('uniqueId')
+        a_uid = (after.get('attributes') or {}).get('uniqueId')
+        if b_uid and a_uid and b_uid != a_uid:
             return 0.0
         before_text = before.get('text', '')
         after_text = after.get('text', '')

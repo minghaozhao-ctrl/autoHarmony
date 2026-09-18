@@ -21,6 +21,7 @@ from engines.diff_engine import WidgetTreeDiff, AutoDiffManager, ChangeReport
 from analyzers.crash_detector import CrashDetector
 from utils.common import run_hdc_command
 from engines.verdict import ActionPipeline
+from engines.logger import archive_dump
 
 
 def _import_hypium():
@@ -36,6 +37,27 @@ def _import_hypium():
 
 class _OperationTimeout(Exception):
     """操作超时异常"""
+
+
+def _record_page_path(analyzer, device) -> None:
+    """从 dump 的窗口节点属性提取 pagePath，登记到路由缓存（纯 hdc 零开销）。
+
+    app 前台时 dumpLayout 的窗口根节点带 pagePath（如 pages/LaunchPage）；
+    桌面/非 app 窗口为空。供 WidgetTreeDiff.get_current_route 回退使用。
+    同时把本次 dump 的本地 JSON 归档进日志目录（复用产物，零额外 dump）。
+    """
+    try:
+        archive_dump(getattr(analyzer, '_temp_file', None) or None, "layout")
+    except Exception:
+        pass
+    try:
+        for w in analyzer.widgets:
+            pp = (w.get('attributes') or {}).get('pagePath')
+            if pp:
+                WidgetTreeDiff.record_page_path(device, pp)
+                return
+    except Exception:
+        pass
 
 
 def _guard_timeout(seconds: int):
@@ -422,75 +444,119 @@ def print_page_state_summary(analyzer, device: Optional[str] = None,
     print("─" * 60)
 
 
-# 弹窗自动处理：常见确认按钮（按优先级排序，正向按钮优先于中性按钮）
-# 与 verdict.DISMISS_BUTTONS 保持一致（verdict 为单一事实来源）
-AUTO_DIALOG_BUTTONS = [
-    "同意", "允许", "仅在使用中允许", "知道了", "我知道了", "好的",
-    "确定", "继续", "立即开启", "去开启", "授权",
-    "跳过", "暂不", "稍后", "以后再说", "以后再說", "取消", "关闭", "暂不开启",
-]
+# 弹窗自动处理：常见关闭按钮（**负向/跳过优先**，正向仅作兜底）
+# 单一事实来源：diff_engine.WidgetTreeDiff.DIALOG_BUTTON_TEXTS
+AUTO_DIALOG_BUTTONS = list(WidgetTreeDiff.DIALOG_BUTTON_TEXTS)
 
 
-def auto_handle_dialogs(device: Optional[str] = None, max_rounds: int = 3) -> bool:
-    """检测并自动关闭系统级弹窗（权限/云存/引导等覆盖层）
+def auto_handle_dialogs(device: Optional[str] = None, max_rounds: int = 3,
+                        engine=None, wait: float = 0.0,
+                        grace: float = 0.0, max_backs: int = 1) -> bool:
+    """检测并自动关闭系统级弹窗（权限/云存/引导等覆盖层）。
 
     dump 控件树 → 找 Overlay 类型容器（Dialog/Sheet/Popup 等）→
     在弹窗后代中找常见确认按钮 → 坐标点击 → 循环直到无弹窗。
+    支持**延迟弹出**：wait 先等 N 秒再开始检测；已清干净后再等 grace 秒
+    补查一次，抓到“动作后才过一两秒才弹出来”的弹窗。
+    支持**无法用按钮关闭时**：按系统返回键兜底（限 max_backs 次，避免把
+    整个 App 退到桌面）。
 
     注意：只处理覆盖层弹窗，页面级隐私政策弹窗（非 overlay）不在此范围。
 
     Args:
         device: 设备 ID
         max_rounds: 最大处理轮数（防止无限弹窗）
+        engine: 可选，复用已有引擎（走 daemon 快路径 dump，且复用其连接）；
+                不传则自建（用后关闭）
+        wait: 开始检测前先等待的秒数（等弹窗先弹出来）
+        grace: 判断已清干净后再等待并补查一次，抓延迟弹出的弹窗（秒）
+        max_backs: 未识别按钮时可按下系统返回键的最大次数（0=禁用）
 
     Returns:
-        是否处理过至少一个弹窗
+        最终是否无覆盖层（True=已清干净，False=仍有弹窗/未识别按钮）
     """
     import time
-    from engines.verdict import find_overlays, find_dismiss_button
+    from engines.verdict import find_overlays, find_dismiss_button, top_overlay
 
-    engine = HdcUITestEngine(device=device)
-    analyzer = WidgetTreeAnalyzer(json_file="auto_dialog.json", device=device)
-    handled = False
-    try:
+    own_engine = engine is None
+    if engine is None:
+        engine = HdcUITestEngine(device=device)
+    clicked_any = False
+    backs = 0
+
+    def _pass(_wait: float) -> bool:
+        """一轮：先等 _wait 秒，再点掉已知弹窗直到无覆盖层或轮数用尽；
+        返回是否最终无覆盖层（已校验）。"""
+        nonlocal clicked_any, backs
+        if _wait > 0:
+            time.sleep(_wait)
         for _ in range(max_rounds):
-            success, msg = analyzer.dump_layout()
-            if not success:
-                print(f"⚠️  弹窗检测跳过（获取控件树失败: {msg}）")
-                break
-            if not analyzer.load_tree():
-                break
-            widgets = analyzer.widgets
-
-            overlays = find_overlays(widgets, analyzer.get_screen_bounds())
-            if not overlays:
-                break
-
-            btn = find_dismiss_button(widgets, overlays[-1])
+            analyzer = engine._dump_and_load("dialog_poll")
+            if analyzer is None:
+                print("⚠️  弹窗检测跳过（获取控件树失败）")
+                return False
+            try:
+                widgets = analyzer.widgets
+                overlays = find_overlays(widgets, analyzer.get_screen_bounds())
+                if not overlays:
+                    return True
+                btn = find_dismiss_button(widgets, top_overlay(overlays))
+            finally:
+                analyzer.cleanup()
             if btn is None:
+                if backs < max_backs:
+                    # 没有已知确认按钮 → 系统返回键兜底（限次，防退到桌面）
+                    print("🔙 未识别弹窗按钮，按系统返回键兜底...")
+                    engine._hdc_cmd(
+                        ["shell", "uitest", "uiInput", "keyEvent", "Back"])
+                    backs += 1
+                    time.sleep(1.5)
+                    continue
                 # 有弹窗但没有认识的按钮，不盲目点击
                 print(f"ℹ️  检测到弹窗但未识别已知按钮（overlay: "
                       f"{overlays[-1].get('type')}），跳过自动处理")
-                break
+                return False
 
             import re as _re
             nums = _re.findall(r'\d+', btn.get('bounds', '') or '')
             if len(nums) < 4:
-                break
+                return False
             x = (int(nums[0]) + int(nums[2])) // 2
             y = (int(nums[1]) + int(nums[3])) // 2
             label = btn.get('text', '')
             print(f"🔔 检测到弹窗，自动点击 '{label}' ({x}, {y})")
             if not engine.click(x, y, f"自动处理弹窗: 点击 '{label}'",
                                 auto_recover=False):
-                break
-            handled = True
+                return False
+            clicked_any = True
             time.sleep(1.5)
+        return False
+
+    cleared = False
+    try:
+        # 先等 wait：让即将弹出的弹窗先弹出来
+        cleared = _pass(wait)
+        # 延迟弹窗：已清干净时再等 grace 秒补查一次，抓到“动作后才弹出”的弹窗
+        if cleared and grace > 0:
+            time.sleep(grace)
+            analyzer = engine._dump_and_load("dialog_grace")
+            if analyzer is not None:
+                try:
+                    late = find_overlays(analyzer.widgets,
+                                         analyzer.get_screen_bounds())
+                finally:
+                    analyzer.cleanup()
+                if late:
+                    print("⏳ 检测到延迟弹出的弹窗，继续自动处理...")
+                    cleared = _pass(0.0)
     finally:
-        analyzer.cleanup()
-    if handled:
+        if own_engine:
+            engine.close()
+    if not cleared:
+        print("⚠️  仍有弹窗未关闭（自动处理未能清干净）")
+    elif clicked_any:
         print("✅ 弹窗自动处理完成")
-    return handled
+    return cleared
 
 
 def _is_descendant_index(widgets: List[dict], idx: int, ancestor_idx: int) -> bool:
@@ -566,15 +632,40 @@ class HdcUITestEngine:
         return run_hdc_command(cmd, timeout)
 
     def _dump_and_load(self, tag: str = "layout") -> Optional[WidgetTreeAnalyzer]:
-        """从设备获取控件树并加载
+        """从设备获取控件树并加载（纯 hdc 快路径，无需 hypium 连接）
 
-        优先走 hypium daemon 快路径（连接后每次 dump 约 0.7s），失败时回退到
-        hdc uitest dumpLayout 慢路径（约 5s），再失败则自动检测闪退。
+        快路径：`uitest dumpLayout`（默认不带 -a）+ `file recv`，实测合计约 0.53s，
+        与 hypium daemon dump 输出完全一致（逐控件字段相同），但省去每次进程约
+        2.3s 的 driver 连接开销。失败时回退 hypium daemon，再回退带 -a 的慢路径。
 
         Returns:
             加载成功的 WidgetTreeAnalyzer，失败返回 None
         """
-        # 快路径：复用 daemon dump
+        # 快路径：纯 hdc dumpLayout（不带 -a，输出与 daemon 一致）
+        remote = f'/data/local/tmp/_uitest_{tag}.json'
+        tmp_path = os.path.join(
+            tempfile.gettempdir(),
+            f'hdc_layout_{tag}_{int(time.time() * 1000000)}.json')
+        for attempt in range(2):
+            ok, out = self._hdc_cmd(
+                ["shell", "uitest", "dumpLayout", "-e", "uniqueId", "-p", remote], timeout=30)
+            if ok:
+                break
+            if attempt == 0:
+                print(f"⚠️  dumpLayout 失败，重试 1/1 ...")
+        if ok:
+            rok, rout = self._hdc_cmd(
+                ["file", "recv", remote, tmp_path], timeout=30)
+            if rok and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                analyzer = WidgetTreeAnalyzer(
+                    json_file=tmp_path, device=self.device)
+                analyzer._temp_file = tmp_path
+                if analyzer.load_tree():
+                    _record_page_path(analyzer, self.device)
+                    return analyzer
+                analyzer.cleanup()
+
+        # 回退：hypium daemon 快路径（需连接，约 2.3s 连接 + 0.6s/dump）
         driver = self._get_driver()
         if driver is not None:
             tmp_path = os.path.join(
@@ -587,12 +678,13 @@ class HdcUITestEngine:
                         json_file=tmp_path, device=self.device)
                     analyzer._temp_file = tmp_path
                     if analyzer.load_tree():
+                        _record_page_path(analyzer, self.device)
                         return analyzer
                     analyzer.cleanup()
             except Exception:
                 pass
 
-        # 慢路径回退：hdc uitest dumpLayout
+        # 慢路径回退：hdc uitest dumpLayout -a
         analyzer = WidgetTreeAnalyzer(
             json_file=f"auto_{tag}.json",
             device=self.device
@@ -608,6 +700,7 @@ class HdcUITestEngine:
             analyzer.cleanup()
             return None
 
+        _record_page_path(analyzer, self.device)
         return analyzer
 
     def has_crashed(self) -> bool:
@@ -674,11 +767,17 @@ class HdcUITestEngine:
                                  fresh_before: bool = False,
                                  auto_recover: bool = True,
                                  is_back: bool = False,
-                                 check_exit: bool = False) -> bool:
-        """通用流程：前置快照 → 执行 HDC uiInput 操作 → 统一裁决管线
+                                 check_exit: bool = False,
+                                 daemon_fn=None,
+                                 hdc_fn=None) -> bool:
+        """通用流程：前置快照 → 执行操作 → 统一裁决管线
+
+        操作原语优先走 `hdc shell uitest uiInput`（约 0.34s，无需 hypium 连接）；
+        失败或不可用时回退到 hypium daemon（`daemon_fn(driver)`，约 0.2s，但需
+        支付一次性 ~2.3s 连接开销，故仅在 hdc 失败时启用）。
 
         Args:
-            ui_input_args: `uitest uiInput` 之后的子命令和参数
+            ui_input_args: 回退用的 `uitest uiInput` 子命令和参数
             desc: 操作描述
             action_name: 操作名称（用于错误提示，如 "点击"）
             expectations: 期望断言字典（route/text_exists/text_gone/no_change/dialog）
@@ -686,18 +785,32 @@ class HdcUITestEngine:
             fresh_before: 强制 fresh before-dump（禁用历史基准复用）
             auto_recover: 被弹窗挡住时自动清理并重试一次
             is_back: 返回类动作（无变化标记 BACK_INEFFECTIVE）
+            daemon_fn: 可选，`fn(driver)` 形式的 daemon 操作（hdc 失败时的回退）
+            hdc_fn: 可选，`fn() -> (success, output)` 多步 hdc 操作（如输入：
+                点击聚焦 → Ctrl+A → text）。提供时替代单条 ui_input_args。
 
         Returns:
             裁决+断言是否全部通过（决定 exit code）
         """
         def action_fn():
-            success, output = self._hdc_cmd(
-                ["shell", "uitest", "uiInput"] + ui_input_args
-            )
-            if not success:
-                print(f"❌ HDC{action_name}失败: {output}")
-                return False
-            return True
+            if hdc_fn is not None:
+                success, output = hdc_fn()
+            else:
+                success, output = self._hdc_cmd(
+                    ["shell", "uitest", "uiInput"] + ui_input_args
+                )
+            if success:
+                return True
+            if daemon_fn is not None:
+                driver = self._get_driver()
+                if driver is not None:
+                    try:
+                        daemon_fn(driver)
+                        return True
+                    except Exception as ex:
+                        print(f"ℹ️ daemon {action_name} 失败({ex})，回退失败")
+            print(f"❌ HDC{action_name}失败: {output}")
+            return False
 
         pipeline = ActionPipeline(self, auto_recover=auto_recover)
         return pipeline.run(action_fn, desc, expectations=expectations,
@@ -714,7 +827,8 @@ class HdcUITestEngine:
         return self._execute_hdc_and_compare(
             ["click", str(x), str(y)], desc, "点击",
             expectations=expectations, skip_before=skip_before,
-            fresh_before=fresh_before, auto_recover=auto_recover)
+            fresh_before=fresh_before, auto_recover=auto_recover,
+            daemon_fn=lambda d: d.touch((x, y)))
 
     def double_click(self, x: int, y: int, operation: str = "",
                      expectations: Optional[dict] = None,
@@ -725,7 +839,8 @@ class HdcUITestEngine:
         return self._execute_hdc_and_compare(
             ["doubleClick", str(x), str(y)], desc, "双击",
             expectations=expectations, skip_before=skip_before,
-            fresh_before=fresh_before, auto_recover=auto_recover)
+            fresh_before=fresh_before, auto_recover=auto_recover,
+            daemon_fn=lambda d: d.double_click((x, y)))
 
     def long_click(self, x: int, y: int, operation: str = "",
                    expectations: Optional[dict] = None,
@@ -736,7 +851,8 @@ class HdcUITestEngine:
         return self._execute_hdc_and_compare(
             ["longClick", str(x), str(y)], desc, "长按",
             expectations=expectations, skip_before=skip_before,
-            fresh_before=fresh_before, auto_recover=auto_recover)
+            fresh_before=fresh_before, auto_recover=auto_recover,
+            daemon_fn=lambda d: d.long_click((x, y)))
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int,
               operation: str = "", expectations: Optional[dict] = None,
@@ -747,7 +863,8 @@ class HdcUITestEngine:
         return self._execute_hdc_and_compare(
             ["swipe", str(x1), str(y1), str(x2), str(y2)], desc, "滑动",
             expectations=expectations, skip_before=skip_before,
-            fresh_before=fresh_before, auto_recover=auto_recover)
+            fresh_before=fresh_before, auto_recover=auto_recover,
+            daemon_fn=lambda d: d.slide((x1, y1), (x2, y2)))
 
     def text_input(self, text: str, operation: str = "",
                    expectations: Optional[dict] = None,
@@ -758,7 +875,8 @@ class HdcUITestEngine:
         return self._execute_hdc_and_compare(
             ["text", text], desc, "输入",
             expectations=expectations, skip_before=skip_before,
-            fresh_before=fresh_before, auto_recover=auto_recover)
+            fresh_before=fresh_before, auto_recover=auto_recover,
+            daemon_fn=lambda d: d.input_text_on_current_cursor(text))
 
     def key_back(self, operation: str = "",
                  expectations: Optional[dict] = None,
@@ -770,7 +888,8 @@ class HdcUITestEngine:
             ["keyEvent", "Back"], desc, "返回键",
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover,
-            is_back=True, check_exit=True)
+            is_back=True, check_exit=True,
+            daemon_fn=lambda d: d.press_back())
 
 
 class HypiumEngine:
@@ -791,6 +910,7 @@ class HypiumEngine:
         self.crash_detector = CrashDetector(device=device)
         self._driver = None
         self._cached_route = None
+        self._screen_cache = None
 
     @staticmethod
     def _suppress_logging():
@@ -798,6 +918,13 @@ class HypiumEngine:
         import logging
         sys.log_mode = "no_console"
         logging.disable(logging.INFO)
+
+    def _hdc_cmd(self, cmd_parts: List[str], timeout: int = 30) -> tuple:
+        cmd = ["hdc"]
+        if self.device:
+            cmd.extend(["-t", self.device])
+        cmd.extend(cmd_parts)
+        return run_hdc_command(cmd, timeout)
 
     def _get_driver(self):
         if self._driver is None:
@@ -820,24 +947,51 @@ class HypiumEngine:
             self._driver = None
 
     def _dump_and_load(self, tag: str = "layout") -> Optional[WidgetTreeAnalyzer]:
-        """通过 hypium UiTree.dump_to_file() 获取控件树（daemon 不冲突）"""
-        import time
-        driver = self._get_driver()
+        """获取控件树并加载（纯 hdc 快路径优先，无需 hypium 连接）
+
+        快路径：`uitest dumpLayout`（不带 -a）+ `file recv`，实测 ~0.53s，输出与
+        daemon dump 完全一致。hypium daemon 连接（~2.3s）仅在快路径失败时启用。
+        """
+        remote = f'/data/local/tmp/_uitest_{tag}.json'
         tmp_path = os.path.join(
             tempfile.gettempdir(),
-            f'hypium_{tag}_{int(time.time() * 1000000)}.json')
-        try:
-            driver.UiTree.dump_to_file(tmp_path)
-        except Exception as e:
-            print(f"❌ 获取控件树失败: {e}")
-            self.crash_detector.detect_and_report()
-            return None
-        analyzer = WidgetTreeAnalyzer(json_file=tmp_path, device=self.device)
-        analyzer._temp_file = tmp_path  # 统一由 cleanup() 清理临时文件
-        if not analyzer.load_tree():
-            analyzer.cleanup()
-            return None
-        return analyzer
+            f'hdc_layout_{tag}_{int(time.time() * 1000000)}.json')
+        for attempt in range(2):
+            ok, out = self._hdc_cmd(
+                ["shell", "uitest", "dumpLayout", "-e", "uniqueId", "-p", remote], timeout=30)
+            if ok:
+                break
+            if attempt == 0:
+                print(f"⚠️  dumpLayout 失败，重试 1/1 ...")
+        if ok:
+            rok, rout = self._hdc_cmd(
+                ["file", "recv", remote, tmp_path], timeout=30)
+            if rok and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                analyzer = WidgetTreeAnalyzer(json_file=tmp_path, device=self.device)
+                analyzer._temp_file = tmp_path
+                if analyzer.load_tree():
+                    _record_page_path(analyzer, self.device)
+                    return analyzer
+                analyzer.cleanup()
+
+        # 回退：hypium daemon dump（需连接）
+        driver = self._get_driver()
+        if driver is not None:
+            try:
+                driver.UiTree.dump_to_file(tmp_path)
+            except Exception as e:
+                print(f"❌ 获取控件树失败: {e}")
+                self.crash_detector.detect_and_report()
+                return None
+            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                analyzer = WidgetTreeAnalyzer(json_file=tmp_path, device=self.device)
+                analyzer._temp_file = tmp_path
+                if analyzer.load_tree():
+                    _record_page_path(analyzer, self.device)
+                    return analyzer
+                analyzer.cleanup()
+        self.crash_detector.detect_and_report()
+        return None
 
     def _get_current_route_cached(self) -> Optional[List[str]]:
         """获取当前路由栈并缓存（同一操作流程内复用，避免重复查询）"""
@@ -923,7 +1077,6 @@ class HypiumEngine:
                       index: Optional[int] = None,
                       fresh_before: bool = False,
                       auto_recover: bool = True) -> bool:
-        BY, _UiDriver = _import_hypium()
         desc = operation or f"点击文本为 '{text}' 的控件"
         if index is not None:
             # 指定索引：直接 dump 控件树按文本匹配列表取第 N 个坐标点击
@@ -932,6 +1085,21 @@ class HypiumEngine:
                                              skip_before=skip_before,
                                              fresh_before=fresh_before,
                                              auto_recover=auto_recover)
+        # 快路径：dump 精确匹配单个控件 → 坐标点击（纯 hdc，无需 hypium 连接）
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: [w for w in ws
+                        if (w.get('text') or '') == text
+                        or (w.get('hint') or '') == text],
+            lambda e, x, y: e.click(x, y, desc,
+                                    expectations=expectations,
+                                    skip_before=True,
+                                    fresh_before=fresh_before,
+                                    auto_recover=auto_recover))
+        if found:
+            return ok
+        # 回退：hypium BY.text 精确匹配（能解析 dump 未覆盖的复杂控件）
+        BY, _UiDriver = _import_hypium()
         result = self._execute_hypium_and_compare(
             lambda: self._touch_guard(
                 lambda: self._get_driver().touch(BY.text(text))), desc,
@@ -963,40 +1131,20 @@ class HypiumEngine:
             expectations: 期望断言字典
             skip_before: 跳过 before-dump
         """
-        analyzer = WidgetTreeAnalyzer(json_file="fuzzy_dump.json", device=self.device)
-        success, msg = analyzer.dump_layout()
-        if not success:
-            print(f"❌ 获取控件树失败: {msg}")
-            return False
-        if not analyzer.load_tree():
-            analyzer.cleanup()
-            return False
-        matched = [w for w in analyzer.widgets
-                   if text.lower() in (w.get('text', '') or '').lower()
-                   or text.lower() in (w.get('hint', '') or '').lower()]
-        if not matched:
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: [w for w in ws
+                        if text.lower() in (w.get('text', '') or '').lower()
+                        or text.lower() in (w.get('hint', '') or '').lower()],
+            lambda e, x, y: e.click(x, y, desc,
+                                    expectations=expectations,
+                                    skip_before=True,
+                                    fresh_before=fresh_before,
+                                    auto_recover=auto_recover),
+            index=index)
+        if not found:
             print(f"❌ 未找到文本/占位符包含 '{text}' 的控件")
-            analyzer.cleanup()
-            return False
-        idx = index or 0
-        if idx >= len(matched):
-            print(f"❌ 文本 '{text}' 匹配 {len(matched)} 个控件，索引 {idx} 越界（0-{len(matched)-1}）")
-            analyzer.cleanup()
-            return False
-        w = matched[idx]
-        coords = self._parse_bounds_center(w.get('bounds', ''))
-        if not coords:
-            print(f"❌ 无法解析控件坐标: {w.get('bounds', '')}")
-            analyzer.cleanup()
-            return False
-        x, y = coords
-        print(f"  匹配控件 [{idx}/{len(matched)}]: type={w.get('type', '')} text={w.get('text', '')}")
-        print(f"  点击坐标: ({x}, {y})")
-        analyzer.cleanup()
-        engine = HdcUITestEngine(device=self.device, history_dir=self.history_dir)
-        return engine.click(x, y, desc, expectations=expectations,
-                            skip_before=skip_before, fresh_before=fresh_before,
-                            auto_recover=auto_recover)
+        return ok
 
     @staticmethod
     def _parse_bounds_center(bounds_str: str) -> Optional[tuple]:
@@ -1007,6 +1155,99 @@ class HypiumEngine:
             x1, y1, x2, y2 = int(nums[0]), int(nums[1]), int(nums[2]), int(nums[3])
             return ((x1 + x2) // 2, (y1 + y2) // 2)
         return None
+
+    def _hdc_click_matches(self, desc: str, matcher_fn, engine_action,
+                           expectations: Optional[dict] = None,
+                           skip_before: bool = False,
+                           fresh_before: bool = False,
+                           auto_recover: bool = True,
+                           index: Optional[int] = None) -> tuple:
+        """hdc 快路径通用动作：dump 控件树（纯 hdc）→ matcher_fn(widgets)
+        匹配 → 取 [index] 控件中心坐标 → engine_action(engine, x, y) 走
+        HdcUITestEngine 坐标动作管线（纯 hdc，无 hypium 连接）。
+
+        查找 dump 同时保存为历史基线并传 skip_before=True，省去一次 before dump。
+
+        Returns:
+            (found, ok): found=True 表示找到控件并执行了动作；ok 为裁决结果。
+            found=False 表示未找到/坐标无法解析（未执行动作）。
+        """
+        analyzer = self._dump_and_load("hdc_action")
+        if analyzer is not None:
+            matched = matcher_fn(analyzer.widgets)
+            idx = index or 0
+            if matched and idx < len(matched):
+                w = matched[idx]
+                coords = self._parse_bounds_center(w.get('bounds', ''))
+                if coords:
+                    x, y = coords
+                    print(f"  匹配控件 [{idx}/{len(matched)}]: type={w.get('type', '')} "
+                          f"text={w.get('text', '')}")
+                    print(f"  点击坐标: ({x}, {y})")
+                    self._save_and_cleanup(analyzer, save_route=True)
+                    engine = HdcUITestEngine(device=self.device,
+                                             history_dir=self.history_dir)
+                    return True, engine_action(engine, x, y)
+            analyzer.cleanup()
+        return False, False
+
+    def _hdc_input_matches(self, desc: str, matcher_fn, input_text: str,
+                           daemon_fn=None,
+                           expectations: Optional[dict] = None,
+                           skip_before: bool = False,
+                           fresh_before: bool = False,
+                           auto_recover: bool = True,
+                           index: Optional[int] = None) -> tuple:
+        """hdc 快路径输入：dump 控件树（纯 hdc）→ matcher_fn(widgets) 匹配输入框
+        → 坐标点击聚焦 → Ctrl+A 全选 → `uiInput text` 覆盖输入（无 hypium 连接）。
+
+        查找 dump 保存为历史基线 + skip_before=True，省一次 before dump。
+        hdc 动作失败时回退 daemon_fn(driver)（hypium daemon 输入）。
+
+        Returns:
+            (found, ok): found=False 表示未匹配到输入框（未执行动作）；
+            found=True 时 ok 为裁决结果。
+        """
+        analyzer = self._dump_and_load("hdc_input")
+        if analyzer is not None:
+            matched = matcher_fn(analyzer.widgets)
+            idx = index or 0
+            if matched and idx < len(matched):
+                w = matched[idx]
+                coords = self._parse_bounds_center(w.get('bounds', ''))
+                if coords:
+                    x, y = coords
+                    print(f"  匹配输入框 [{idx}/{len(matched)}]: "
+                          f"type={w.get('type', '')} text={w.get('text', '')} "
+                          f"placeholder={w.get('placeholder', '')}")
+                    print(f"  点击坐标: ({x}, {y})")
+                    self._save_and_cleanup(analyzer, save_route=True)
+                    engine = HdcUITestEngine(device=self.device,
+                                             history_dir=self.history_dir)
+
+                    def hdc_fn():
+                        ok1, o1 = engine._hdc_cmd(
+                            ["shell", "uitest", "uiInput", "click", str(x), str(y)])
+                        if not ok1:
+                            return False, o1
+                        time.sleep(0.2)  # 等待输入框聚焦
+                        # Ctrl+A 全选（覆盖输入语义，避免追加）；失败则退回追加
+                        okk, _ = engine._hdc_cmd(
+                            ["shell", "uitest", "uiInput",
+                             "keyEvent", "2072", "2017"])
+                        if not okk:
+                            print("ℹ️  Ctrl+A 全选失败，将在现有内容后追加输入")
+                        time.sleep(0.15)
+                        return engine._hdc_cmd(
+                            ["shell", "uitest", "uiInput", "text", input_text])
+
+                    return True, engine._execute_hdc_and_compare(
+                        [], desc, "输入", expectations=expectations,
+                        skip_before=True, fresh_before=fresh_before,
+                        auto_recover=auto_recover,
+                        hdc_fn=hdc_fn, daemon_fn=daemon_fn)
+            analyzer.cleanup()
+        return False, False
 
     def click_by_id(self, key: str, operation: str = "",
                     expectations: Optional[dict] = None,
@@ -1034,44 +1275,41 @@ class HypiumEngine:
                            fresh_before: bool = False,
                            auto_recover: bool = True) -> bool:
         """dump 控件树，按 id/key 字段搜索，坐标点击（带断言）"""
-        analyzer = WidgetTreeAnalyzer(json_file="id_dump.json", device=self.device)
-        success, msg = analyzer.dump_layout()
-        if not success:
-            print(f"❌ 获取控件树失败: {msg}")
-            return False
-        if not analyzer.load_tree():
-            analyzer.cleanup()
-            return False
-        # 优先精确匹配 id，其次按 key 字段，最后 id 包含匹配
-        widgets = analyzer.widgets
-        matched = ([w for w in widgets if (w.get('id', '') or '') == key]
-                   or [w for w in widgets if (w.get('attributes', {}).get('key', '') or '') == key]
-                   or [w for w in widgets if key.lower() in (w.get('id', '') or '').lower()])
-        if not matched:
-            analyzer.cleanup()
-            return False
-        w = matched[0]
-        coords = self._parse_bounds_center(w.get('bounds', ''))
-        if not coords:
-            print(f"❌ 无法解析控件坐标: {w.get('bounds', '')}")
-            analyzer.cleanup()
-            return False
-        x, y = coords
-        print(f"  按 id 匹配控件: type={w.get('type', '')} id={w.get('id', '')} bounds={w.get('bounds', '')}")
-        print(f"  点击坐标: ({x}, {y})")
-        analyzer.cleanup()
-        engine = HdcUITestEngine(device=self.device, history_dir=self.history_dir)
-        return engine.click(x, y, desc, expectations=expectations,
-                            skip_before=skip_before, fresh_before=fresh_before,
-                            auto_recover=auto_recover)
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: ([w for w in ws if (w.get('id', '') or '') == key]
+                        or [w for w in ws
+                            if (w.get('attributes', {}) or {}).get('key', '') == key]
+                        or [w for w in ws
+                            if key.lower() in (w.get('id', '') or '').lower()]),
+            lambda e, x, y: e.click(x, y, desc,
+                                    expectations=expectations,
+                                    skip_before=True,
+                                    fresh_before=fresh_before,
+                                    auto_recover=auto_recover))
+        if not found:
+            print(f"❌ 未找到 id/key 含 '{key}' 的控件")
+        return ok
 
     def click_by_type(self, widget_type: str, operation: str = "",
                       expectations: Optional[dict] = None,
                       skip_before: bool = False,
                       fresh_before: bool = False,
                       auto_recover: bool = True) -> bool:
-        from hypium import BY
         desc = operation or f"点击类型为 '{widget_type}' 的控件"
+        # 快路径：dump 按 type 精确匹配 → 坐标点击（纯 hdc，无 hypium 连接）
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: [w for w in ws if (w.get('type') or '') == widget_type],
+            lambda e, x, y: e.click(x, y, desc,
+                                    expectations=expectations,
+                                    skip_before=True,
+                                    fresh_before=fresh_before,
+                                    auto_recover=auto_recover))
+        if found:
+            return ok
+        # 回退：hypium BY.type
+        from hypium import BY
         return self._execute_hypium_and_compare(
             lambda: self._get_driver().touch(
                 self._get_driver().find_component(BY.type(widget_type))), desc,
@@ -1083,8 +1321,20 @@ class HypiumEngine:
                              skip_before: bool = False,
                              fresh_before: bool = False,
                              auto_recover: bool = True) -> bool:
-        from hypium import BY
         desc = operation or f"双击文本为 '{text}' 的控件"
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: [w for w in ws
+                        if (w.get('text') or '') == text
+                        or (w.get('hint') or '') == text],
+            lambda e, x, y: e.double_click(x, y, desc,
+                                           expectations=expectations,
+                                           skip_before=True,
+                                           fresh_before=fresh_before,
+                                           auto_recover=auto_recover))
+        if found:
+            return ok
+        from hypium import BY
         return self._execute_hypium_and_compare(
             lambda: self._get_driver().double_click(BY.text(text)), desc,
             expectations=expectations, skip_before=skip_before,
@@ -1095,8 +1345,20 @@ class HypiumEngine:
                            skip_before: bool = False,
                            fresh_before: bool = False,
                            auto_recover: bool = True) -> bool:
-        from hypium import BY
         desc = operation or f"长按文本为 '{text}' 的控件"
+        found, ok = self._hdc_click_matches(
+            desc,
+            lambda ws: [w for w in ws
+                        if (w.get('text') or '') == text
+                        or (w.get('hint') or '') == text],
+            lambda e, x, y: e.long_click(x, y, desc,
+                                         expectations=expectations,
+                                         skip_before=True,
+                                         fresh_before=fresh_before,
+                                         auto_recover=auto_recover))
+        if found:
+            return ok
+        from hypium import BY
         return self._execute_hypium_and_compare(
             lambda: self._get_driver().long_click(BY.text(text)), desc,
             expectations=expectations, skip_before=skip_before,
@@ -1108,21 +1370,50 @@ class HypiumEngine:
                       skip_before: bool = False,
                       fresh_before: bool = False,
                       auto_recover: bool = True) -> bool:
-        from hypium import BY
         desc = operation or f"在 '{target_text}' 输入框中输入 '{input_text}'"
+
+        def daemon_text(d):
+            from hypium import BY
+            d.input_text(d.find_component(BY.text(target_text)), input_text)
+
+        def daemon_hint(d):
+            from hypium import BY
+            d.input_text(d.find_component(BY.hint(target_text)), input_text)
+
+        # 快路径：hdc（无需 hypium 连接）—— text 精确匹配
+        found, ok = self._hdc_input_matches(
+            desc,
+            lambda ws: [w for w in ws if (w.get('text') or '') == target_text],
+            input_text, daemon_fn=daemon_text,
+            expectations=expectations, skip_before=skip_before,
+            fresh_before=fresh_before, auto_recover=auto_recover)
+        if found:
+            return ok
+        # 精确 text 匹配失败：输入框的常见目标其实是占位符 hint（如"请输入手机号码"）
+        print("ℹ️  text 精确匹配失败，尝试按 hint 占位符匹配...")
+        found, ok = self._hdc_input_matches(
+            desc,
+            lambda ws: [w for w in ws
+                        if (w.get('hint') or w.get('placeholder') or '') == target_text],
+            input_text, daemon_fn=daemon_hint,
+            expectations=expectations, skip_before=skip_before,
+            fresh_before=fresh_before, auto_recover=auto_recover)
+        if found:
+            return ok
+        # 兜底：hypium driver 路径（原实现）
+        from hypium import BY
         result = self._execute_hypium_and_compare(
-            lambda: self._get_driver().input_text(
-                self._get_driver().find_component(BY.text(target_text)), input_text), desc,
+            lambda: (self._get_driver().input_text(
+                self._get_driver().find_component(BY.text(target_text)),
+                input_text) or True), desc,
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
         if result:
             return True
-        # 精确 text 匹配失败：输入框的常见目标其实是占位符 hint（如"请输入手机号码"）。
-        # 第二次尝试复用同一 before 基准（首次未生效，页面未变）。
-        print("ℹ️  text 精确匹配失败，尝试按 hint 占位符匹配...")
         return self._execute_hypium_and_compare(
-            lambda: self._get_driver().input_text(
-                self._get_driver().find_component(BY.hint(target_text)), input_text), desc,
+            lambda: (self._get_driver().input_text(
+                self._get_driver().find_component(BY.hint(target_text)),
+                input_text) or True), desc,
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
 
@@ -1132,11 +1423,27 @@ class HypiumEngine:
                       skip_before: bool = False,
                       fresh_before: bool = False,
                       auto_recover: bool = True) -> bool:
-        from hypium import BY
         desc = operation or f"在 {widget_type} 中输入 '{input_text}'"
+
+        def daemon_fn(d):
+            from hypium import BY
+            d.input_text(d.find_component(BY.type(widget_type)), input_text)
+
+        # 快路径：hdc（无需 hypium 连接）
+        found, ok = self._hdc_input_matches(
+            desc,
+            lambda ws: [w for w in ws if (w.get('type') or '') == widget_type],
+            input_text, daemon_fn=daemon_fn,
+            expectations=expectations, skip_before=skip_before,
+            fresh_before=fresh_before, auto_recover=auto_recover)
+        if found:
+            return ok
+        # 兜底：hypium driver 路径（原实现）
+        from hypium import BY
         return self._execute_hypium_and_compare(
-            lambda: self._get_driver().input_text(
-                self._get_driver().find_component(BY.type(widget_type)), input_text), desc,
+            lambda: (self._get_driver().input_text(
+                self._get_driver().find_component(BY.type(widget_type)),
+                input_text) or True), desc,
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
 
@@ -1147,7 +1454,24 @@ class HypiumEngine:
                         fresh_before: bool = False,
                         auto_recover: bool = True) -> bool:
         desc = operation or f"向 {direction} 滑动 {distance}"
-        # hypium swipe() 返回 None（无返回值语义），包装为成功
+        # 快路径：纯 hdc uiInput swipe（无需 hypium 连接），从屏幕中心按方向滑动
+        if self._driver is None:
+            w, h = self._screen_wh()
+            cx, cy = w // 2, h // 2
+            d = max(10, int(distance))
+            step = {
+                'up': (cx, cy - d), 'down': (cx, cy + d),
+                'left': (cx - d, cy), 'right': (cx + d, cy),
+            }.get(direction)
+            if step:
+                ex, ey = step
+                engine = HdcUITestEngine(device=self.device, history_dir=self.history_dir)
+                return engine.swipe(cx, cy, ex, ey, desc,
+                                    expectations=expectations,
+                                    skip_before=skip_before,
+                                    fresh_before=fresh_before,
+                                    auto_recover=auto_recover)
+        # 回退：hypium swipe()（返回 None，包装为成功）
         return self._execute_hypium_and_compare(
             lambda: (self._get_driver().swipe(direction, distance=distance) or True), desc,
             expectations=expectations, skip_before=skip_before,
@@ -1159,6 +1483,13 @@ class HypiumEngine:
                 fresh_before: bool = False,
                 auto_recover: bool = True) -> bool:
         desc = operation or "按下返回键"
+        # 快路径：纯 hdc uiInput keyEvent Back（无需 hypium 连接）
+        if self._driver is None:
+            engine = HdcUITestEngine(device=self.device, history_dir=self.history_dir)
+            return engine.key_back(desc, expectations=expectations,
+                                   skip_before=skip_before,
+                                   fresh_before=fresh_before,
+                                   auto_recover=auto_recover)
         return self._execute_hypium_and_compare(
             lambda: self._get_driver().press_back(), desc, check_exit=True,
             expectations=expectations, skip_before=skip_before,
@@ -1180,6 +1511,36 @@ class HypiumEngine:
 
     def check_component(self, text: Optional[str] = None, key: Optional[str] = None,
                         widget_type: Optional[str] = None, wait_time: int = 2) -> bool:
+        conditions = []
+        if text: conditions.append(f"text='{text}'")
+        if key: conditions.append(f"key='{key}'")
+        if widget_type: conditions.append(f"type='{widget_type}'")
+        if not conditions:
+            print("❌ 至少指定一个搜索条件 (text/key/type)")
+            return False
+        cond_str = " + ".join(conditions)
+
+        def _match(w) -> bool:
+            if text and text.lower() not in (w.get('text', '') or '').lower() \
+                    and text.lower() not in (w.get('hint', '') or '').lower():
+                return False
+            if key and (w.get('id', '') or '') != key \
+                    and (w.get('attributes', {}) or {}).get('key', '') != key:
+                return False
+            if widget_type and (w.get('type', '') or '') != widget_type:
+                return False
+            return True
+
+        # 快路径：dump 控件树匹配（纯 hdc ~1.2s，无需 hypium 连接）
+        a = self._dump_and_load("checkex")
+        if a is not None:
+            try:
+                if any(_match(w) for w in a.widgets):
+                    print(f"✅ 控件存在: {cond_str}")
+                    return True
+            finally:
+                a.cleanup()
+        # 回退：hypium 精确检查（异步渲染/复杂控件场景，带等待）
         from hypium import BY
         selector = None
         if text:
@@ -1188,15 +1549,7 @@ class HypiumEngine:
             selector = BY.key(key) if selector is None else selector.key(key)
         if widget_type:
             selector = BY.type(widget_type) if selector is None else selector.type(widget_type)
-        if selector is None:
-            print("❌ 至少指定一个搜索条件 (text/key/type)")
-            return False
         driver = self._get_driver()
-        conditions = []
-        if text: conditions.append(f"text='{text}'")
-        if key: conditions.append(f"key='{key}'")
-        if widget_type: conditions.append(f"type='{widget_type}'")
-        cond_str = " + ".join(conditions)
         try:
             driver.check_component_exist(selector, wait_time=wait_time)
             print(f"✅ 控件存在: {cond_str}")
@@ -1256,20 +1609,24 @@ class HypiumEngine:
         matched = [w for w in analyzer.widgets
                    if text.lower() in (w.get('text', '') or '').lower()
                    or text.lower() in (w.get('hint', '') or '').lower()]
-        sig = self._page_signature(analyzer)
+        # 返回内容敏感签名（标题栏签名 _page_signature 只覆盖 y100~320，
+        # 对滚动内容不敏感，不能用于判断"是否滚动了"）
+        sig = self._scroll_signature(analyzer.widgets)
         analyzer.cleanup()
         return matched, sig
 
     def _screen_has_text(self, text: str) -> bool:
-        """当前屏幕是否存在含 text 的控件（精确查询 + dump 包含匹配双通道）"""
+        """当前屏幕是否存在含 text 的控件（dump 包含匹配优先 + hypium 精确兜底）"""
+        matched, _ = self._fuzzy_match_widgets(text)
+        if matched:
+            return True
         from hypium import BY
         try:
             self._get_driver().check_component_exist(BY.text(text), wait_time=1)
             return True
         except Exception:
             pass
-        matched, _ = self._fuzzy_match_widgets(text)
-        return bool(matched)
+        return False
 
     @staticmethod
     def _max_y_of_widgets(widgets) -> int:
@@ -1281,73 +1638,320 @@ class HypiumEngine:
                 max_y = max(max_y, int(nums[3]))
         return max_y
 
-    def _raw_swipe_page_up(self):
-        """上滑一屏（内容向下滚动），失败返回 False"""
+    @staticmethod
+    def _scroll_signature(widgets) -> tuple:
+        """滚动内容签名：所有可见 Text 的 (文本, y/5) 集合。
+
+        标题栏签名 _compute_page_signature 只覆盖 y100~320 区域，滚动内容
+        不改变它，因此不能用来判断"是否滚动了"。本签名对任何竖向位移敏感，
+        用于检测滚动是否真的产生位移（判断列表是否到底）。
+        """
+        import re
+        sig = []
+        for w in widgets:
+            if w.get('type') != 'Text':
+                continue
+            t = (w.get('text') or '').strip()
+            if not t:
+                continue
+            m = re.findall(r'\d+', w.get('bounds', '') or '')
+            y = int(m[1]) if len(m) >= 2 else 0
+            sig.append((t, y // 5))
+        return tuple(sorted(sig))
+
+    def _find_scroll_candidates(self, analyzer) -> list:
+        """识别候选竖向滚动容器，返回 bounds 列表（按高度降序）。
+
+        只认竖向滚动容器，排除横向 Swiper（竖滑无效且可能误触发翻页）：
+        - 类型 Scroll/List/ListItemGroup/Grid
+        - 宽高均 >= 80px
+        高度越大越可能是主滚动区，故按高度降序。
+        """
+        import re
+        cands, seen = [], set()
+        for w in analyzer.widgets:
+            t = (w.get('type') or '').lower()
+            if t not in ('scroll', 'list', 'listitemgroup', 'grid'):
+                continue
+            nums = re.findall(r'\d+', w.get('bounds', '') or '')
+            if len(nums) < 4:
+                continue
+            x1, y1, x2, y2 = (int(n) for n in nums[:4])
+            if y2 - y1 < 80 or x2 - x1 < 80:
+                continue
+            key = (x1, y1, x2, y2)
+            if key in seen:
+                continue
+            seen.add(key)
+            cands.append(key)
+        cands.sort(key=lambda b: -(b[3] - b[1]))
+        return cands
+
+    # ---------- 底层滑动 ----------
+
+    def _do_swipe(self, x: int, y1: int, y2: int, duration: int) -> bool:
+        """执行一次 hdc uiInput swipe，返回是否成功。"""
         import subprocess
-        analyzer = self._dump_and_load("swipegeo")
-        width, max_y = 1256, 2720
-        if analyzer:
-            widgets = analyzer.widgets
-            for w in widgets:
-                import re
-                nums = re.findall(r'\d+', w.get('bounds', '') or '')
-                if len(nums) >= 4:
-                    width = max(width, int(nums[2]))
-            max_y = max(max_y, self._max_y_of_widgets(widgets))
-            analyzer.cleanup()
-        x = width // 2
-        # 避开底部系统返回手势区（起点<=65%屏高）和顶部状态栏（终点>=30%屏高）
-        y1, y2 = int(max_y * 0.65), int(max_y * 0.30)
         cmd = ['hdc']
         if self.device:
             cmd += ['-t', self.device]
         cmd += ['shell', 'uitest', 'uiInput', 'swipe',
-                str(x), str(int(max_y * 0.8)), str(x), str(int(max_y * 0.25)), '600']
+                str(x), str(y1), str(x), str(y2), str(duration)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return r.returncode == 0
         except Exception:
             return False
 
+    def _screen_wh(self) -> tuple:
+        """屏幕宽高 (px)，带缓存。仅当 daemon 已连接时用 get_display_size()（~0.006s）；
+        否则走快速 dump 的 get_screen_bounds()（纯 hdc ~0.45s），再失败回退 (1260, 2720)。
+
+        注意：不能为取尺寸而新建 hypium 连接（~2.3s），得不偿失。"""
+        if self._screen_cache is not None:
+            return self._screen_cache
+        w, h = None, None
+        driver = self._driver  # 仅复用已存在的连接
+        if driver is not None:
+            try:
+                size = driver.get_display_size()
+                if size and len(size) >= 2 and size[0] > 0 and size[1] > 0:
+                    w, h = int(size[0]), int(size[1])
+            except Exception:
+                w, h = None, None
+        if w is None:
+            a = self._dump_and_load("screenwh")
+            if a:
+                sb = a.get_screen_bounds()
+                if sb:
+                    w, h = sb[2], sb[3]
+                a.cleanup()
+        if not w or not h:
+            w, h = 1260, 2720
+        self._screen_cache = (w, h)
+        return w, h
+
+    def _swipe_page_up_in(self, cb) -> bool:
+        """在指定容器 bounds 内上滑一屏（内容下滚）。"""
+        x = (cb[0] + cb[2]) // 2
+        y1 = int(cb[1] + (cb[3] - cb[1]) * 0.80)
+        y2 = int(cb[1] + (cb[3] - cb[1]) * 0.25)
+        return self._do_swipe(x, y1, y2, 600)
+
+    def _swipe_page_up_fullscreen(self) -> bool:
+        """整屏中线上滑一屏（兜底，不依赖容器识别）。"""
+        w, h = self._screen_wh()
+        return self._do_swipe(w // 2, int(h * 0.80), int(h * 0.25), 600)
+
+    def _swipe_small_up_in(self, cb) -> bool:
+        """在指定容器内小幅上滑（约 1/4 容器高），修正目标被底边截断。"""
+        x = (cb[0] + cb[2]) // 2
+        y1 = int(cb[1] + (cb[3] - cb[1]) * 0.78)
+        y2 = int(cb[1] + (cb[3] - cb[1]) * 0.62)
+        return self._do_swipe(x, y1, y2, 400)
+
+    def _swipe_small_up_fullscreen(self) -> bool:
+        """整屏中线小幅上滑（兜底）。"""
+        w, h = self._screen_wh()
+        return self._do_swipe(w // 2, int(h * 0.78), int(h * 0.62), 400)
+
+    # ---------- 自适应滚动 ----------
+
+    def _adaptive_scroll(self, working_region, settle_interval):
+        """执行一次"向下滚动"，自适应选有效区域并用内容签名验证真实位移。
+
+        依次尝试：已验证区域 → 候选竖向容器(按高度) → 整屏兜底。
+        只有当内容签名发生变化才算滚动成功（避免在不可滚区域误判"到底"）。
+
+        返回 (moved: bool, 新内容签名, 生效区域)。
+        """
+        import time
+        a = self._dump_and_load("scrollstep")
+        if not a:
+            return False, None, working_region
+        base_sig = self._scroll_signature(a.widgets)
+        candidates = []
+        if working_region:
+            candidates.append(working_region)
+        for cb in self._find_scroll_candidates(a):
+            if cb not in candidates:
+                candidates.append(cb)
+        a.cleanup()
+
+        for cb in candidates:
+            if not self._swipe_page_up_in(cb):
+                continue
+            time.sleep(settle_interval)
+            a2 = self._dump_and_load("scrollstep2")
+            if not a2:
+                continue
+            sig = self._scroll_signature(a2.widgets)
+            a2.cleanup()
+            if sig != base_sig:
+                return True, sig, cb
+
+        # 兜底：整屏中线滑动（容器识别可能漏掉/误选时仍能尝试）
+        if self._swipe_page_up_fullscreen():
+            time.sleep(settle_interval)
+            a3 = self._dump_and_load("scrollstep3")
+            if a3:
+                sig = self._scroll_signature(a3.widgets)
+                a3.cleanup()
+                if sig != base_sig:
+                    return True, sig, None
+        return False, base_sig, working_region
+
+    def _scroll_ancestor_of(self, ws, w) -> Optional[tuple]:
+        """沿 parent_index 向上，返回目标最近的竖向滚动容器 bounds。
+
+        用于"修正目标被底边截断"时，把小幅滑动准确落在目标所属的滚动容器内
+        （应对页面只有部分区域可滚动的场景）。
+        """
+        import re
+        idx = None
+        for i, x in enumerate(ws):
+            if x is w:
+                idx = i
+                break
+        if idx is None:  # 跨 dump 对象不同 → 按 类型+bounds+文本 匹配
+            for i, x in enumerate(ws):
+                if (x.get('bounds') == w.get('bounds')
+                        and x.get('text') == w.get('text')
+                        and x.get('type') == w.get('type')):
+                    idx = i
+                    break
+        if idx is None:
+            return None
+        p = ws[idx].get('parent_index')
+        depth = 0
+        while p is not None and depth < 60 and 0 <= p < len(ws):
+            pw = ws[p]
+            t = (pw.get('type') or '').lower()
+            if t in ('scroll', 'list', 'listitemgroup', 'grid'):
+                nums = re.findall(r'\d+', pw.get('bounds', '') or '')
+                if len(nums) >= 4:
+                    return (int(nums[0]), int(nums[1]), int(nums[2]), int(nums[3]))
+            p = pw.get('parent_index')
+            depth += 1
+        return None
+
+    def _is_bottom_clipped(self, w: dict, screen_h: int, margin: int = 80) -> bool:
+        """判断控件是否被屏幕底部截断（bottom 贴/超屏底，只露出残影）。"""
+        import re
+        nums = re.findall(r'\d+', w.get('bounds', '') or '')
+        if len(nums) < 4:
+            return False
+        y2 = int(nums[3])
+        return y2 > screen_h - margin
+
+    @staticmethod
+    def _match_in_widgets(widgets, text) -> Optional[dict]:
+        """在 widget 列表中按文本包含匹配（text + hint），返回首个匹配。"""
+        tl = text.lower()
+        for w in widgets:
+            if (tl in (w.get('text', '') or '').lower()
+                    or tl in (w.get('hint', '') or '').lower()):
+                return w
+        return None
+
+    def _ensure_match_fully_visible(self, text: str, settle_interval: float,
+                                    max_adjust: int = 6) -> tuple:
+        """确保已找到的目标完整显示在屏幕内（不被底边截断）。
+
+        被截断时在**目标所属的滚动容器**内小幅上滑并重新查找，直到：
+        - 目标 bottom 脱离屏底区域 → (True, 最终控件)
+        - 内容不再移动（到底）或超过 max_adjust 次 → (False, 最终控件)
+        """
+        import time
+        a = self._dump_and_load("vfix")
+        if not a:
+            return True, None
+        sb = a.get_screen_bounds()
+        screen_h = sb[3] if sb else 2720
+        ws = a.widgets
+        w = self._match_in_widgets(ws, text)
+        if w is None:
+            a.cleanup()
+            return True, None
+        region = self._scroll_ancestor_of(ws, w)
+        clipped = self._is_bottom_clipped(w, screen_h)
+        a.cleanup()
+        if not clipped:
+            return True, w
+
+        last_sig = None
+        for _ in range(max_adjust):
+            ok = (self._swipe_small_up_in(region) if region
+                  else self._swipe_small_up_fullscreen())
+            if not ok:
+                break
+            time.sleep(settle_interval)
+            a2 = self._dump_and_load("vfix2")
+            if not a2:
+                break
+            ws2 = a2.widgets
+            sig = self._scroll_signature(ws2)
+            sb2 = a2.get_screen_bounds()
+            screen_h = sb2[3] if sb2 else screen_h
+            w2 = self._match_in_widgets(ws2, text)
+            a2.cleanup()
+            if w2 is None:
+                break
+            w = w2
+            if not self._is_bottom_clipped(w, screen_h):
+                return True, w
+            if last_sig is not None and sig == last_sig:
+                break  # 内容不再移动 → 已到列表底
+            last_sig = sig
+        return False, w
+
     def scroll_find(self, text: str, max_swipes: int = 8,
                     settle_interval: float = 1.0) -> bool:
         """智能滚动查找：
-        1. 先不滚动，在当前屏幕轮询（应对异步渲染，最多 settle_interval*4 秒）
-        2. 找不到才每次滚动一屏，滚动后重新轮询
-        3. 连续两屏页面签名不变视为到底，停止并报告未找到
+        1. 先不滚动，在当前屏幕轮询（应对异步渲染）——首屏 2 次、滚动后 1 次，
+           每次轮询间隔 settle_interval（原实现首屏 4 次/滚动后 2 次，dump 偏多）
+        2. 找不到才滚动，自适应选择有效滚动区域（候选竖向容器 → 整屏兜底），
+           并用"内容签名是否变化"判断是否真的滚动（避免在不可滚区域误判到底）
+        3. 找到目标后，若其被屏幕底边截断（只露出残影），在目标所属滚动
+           容器内继续小幅上滑，确保目标完整显示在屏幕内
         """
         import time
-        last_sig = None
+        working_region = None
         for i in range(max_swipes + 1):
-            polls = 4 if i == 0 else 2
-            cur_sig = None
+            polls = 2 if i == 0 else 1
             for p in range(polls):
-                matched, sig = self._fuzzy_match_widgets(text)
-                cur_sig = sig
+                matched, _ = self._fuzzy_match_widgets(text)
                 if matched:
-                    w = matched[0]
+                    visible, w = self._ensure_match_fully_visible(
+                        text, settle_interval)
+                    if w is None:
+                        w = matched[0]
                     cx = self._parse_bounds_center(w.get('bounds', ''))
-                    print(f"✅ 找到 '{text}' (第{i}屏): "
-                          f"type={w.get('type', '')} bounds={w.get('bounds', '')} "
-                          f"center={cx} 共{len(matched)}个匹配")
-                    return True
+                    if visible:
+                        print(f"✅ 找到 '{text}' (第{i}屏): "
+                              f"type={w.get('type', '')} bounds={w.get('bounds', '')} "
+                              f"center={cx} 共{len(matched)}个匹配")
+                        return True
+                    print(f"❌ 找到 '{text}' 但在屏幕底部被截断，"
+                          f"滚动到底仍未完整显示: bounds={w.get('bounds', '')}")
+                    return False
                 if p < polls - 1:
                     time.sleep(settle_interval)
-            if i > 0 and last_sig is not None and cur_sig is not None and cur_sig == last_sig:
+            if i >= max_swipes:
+                break
+            moved, _sig, working_region = self._adaptive_scroll(
+                working_region, settle_interval)
+            if not moved:
                 print(f"❌ 列表已到底，未找到 '{text}'")
                 return False
-            last_sig = cur_sig
-            if i < max_swipes:
-                if not self._raw_swipe_page_up():
-                    print("❌ 滚动执行失败")
-                    return False
-                time.sleep(settle_interval)
+            time.sleep(settle_interval)
         print(f"❌ 已滚动 {max_swipes} 屏，未找到 '{text}'")
         return False
 
     def screenshot(self, save_path: str) -> bool:
         import subprocess
         import os
+        # 快路径：纯 hdc screenCap + recv（约 0.6s，无需 hypium 连接）
         device_path = '/data/local/tmp/_screenshot_tmp.png'
         cmd = ['hdc']
         if self.device:
@@ -1355,21 +1959,30 @@ class HypiumEngine:
         try:
             r1 = subprocess.run(cmd + ['shell', 'uitest', 'screenCap', '-p', device_path],
                                 capture_output=True, text=True, timeout=30)
-            if r1.returncode != 0:
+            if r1.returncode == 0:
+                r2 = subprocess.run(cmd + ['file', 'recv', device_path, save_path],
+                                    capture_output=True, text=True, timeout=30)
+                # 复用固定远端临时文件（下次 screenCap 覆盖），省去一次 rm 调用（~0.3s）
+                if r2.returncode == 0 and os.path.exists(save_path) \
+                        and os.path.getsize(save_path) > 0:
+                    print(f"✅ 截图已保存: {save_path}")
+                    return True
+                print(f"❌ 拉取截图失败: {r2.stderr or r2.stdout}")
+            else:
                 print(f"❌ 截图失败: {r1.stderr or r1.stdout}")
-                return False
-            r2 = subprocess.run(cmd + ['file', 'recv', device_path, save_path],
-                                capture_output=True, text=True, timeout=30)
-            subprocess.run(cmd + ['shell', 'rm', '-f', device_path],
-                           capture_output=True, text=True, timeout=10)
-            if r2.returncode == 0:
-                print(f"✅ 截图已保存: {save_path}")
-                return True
-            print(f"❌ 拉取截图失败: {r2.stderr or r2.stdout}")
-            return False
         except Exception as e:
             print(f"❌ 截图失败: {e}")
-            return False
+        # 回退：daemon capture_screen（单次调用；仅支持 jpeg 后缀）
+        driver = self._get_driver()
+        if driver is not None and save_path.lower().endswith((".jpg", ".jpeg")):
+            try:
+                driver.capture_screen(save_path)
+                if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                    print(f"✅ 截图已保存: {save_path}")
+                    return True
+            except Exception:
+                pass
+        return False
 
     def aa_start(self, uri: str, action: str = "ohos.want.action.viewData",
                  bundle_name: str = "com.cmcc.DigitalHome",

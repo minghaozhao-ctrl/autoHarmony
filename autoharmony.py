@@ -110,6 +110,12 @@ def _add_expect_args(p):
                    help='Assertion polling timeout seconds (default 0 = no polling)')
     p.add_argument('--auto-handle-dialog', action='store_true',
                    help='Auto-dismiss overlay dialogs before/after action')
+    p.add_argument('--auto-dialog-wait', type=float, default=0.0,
+                   help='Auto-handle: wait N s before first dialog check')
+    p.add_argument('--auto-dialog-grace', type=float, default=2.0,
+                   help='Auto-handle: after clearing wait N s & recheck delayed dialog')
+    p.add_argument('--auto-dialog-back', type=int, default=1,
+                   help='Auto-handle: max system-back fallback presses')
     p.add_argument('--fresh-before', action='store_true',
                    help='Force fresh baseline dump before action')
     p.add_argument('--no-recover', action='store_true',
@@ -136,7 +142,8 @@ def _run_ui_action(args, engine, action_fn):
         expectations.pop('no_change', None)
 
     if auto_dialog:
-        auto_handle_dialogs(args.device)
+        auto_handle_dialogs(args.device, wait=args.auto_dialog_wait,
+                            max_backs=args.auto_dialog_back)
 
     pass_expect = None if auto_dialog else expectations
     ok = action_fn(pass_expect)
@@ -151,7 +158,8 @@ def _run_ui_action(args, engine, action_fn):
         return False
 
     if auto_dialog:
-        auto_handle_dialogs(args.device)
+        auto_handle_dialogs(args.device, grace=args.auto_dialog_grace,
+                            max_backs=args.auto_dialog_back)
         if expectations:
             ok = check_expectations_with_polling(
                 expectations,
@@ -441,70 +449,72 @@ def cmd_ui_scroll_find(args):
 
 def cmd_ui_dismiss_dialogs(args):
     """Standalone dialog dismiss: click known confirm buttons to close overlays"""
-    from engines.engines import auto_handle_dialogs
-    handled = auto_handle_dialogs(args.device, max_rounds=args.rounds)
-    if handled:
-        print("ACTION_VERDICT: SUCCESS | reason=dialogs dismissed")
-        sys.exit(0)
-    from engines.verdict import find_overlays
-    from analyzers.widget_tree import WidgetTreeAnalyzer
-    analyzer = WidgetTreeAnalyzer(json_file="dismiss_check.json", device=args.device)
-    success, msg = analyzer.dump_layout()
-    if not success:
-        print(f"❌ Failed to get widget tree: {msg}")
-        sys.exit(1)
-    if not analyzer.load_tree():
-        analyzer.cleanup()
+    from engines.engines import auto_handle_dialogs, HdcUITestEngine
+    from engines.verdict import find_overlays, top_overlay, overlay_summary
+    auto_handle_dialogs(args.device, max_rounds=args.rounds,
+                        wait=args.wait, grace=args.grace, max_backs=args.back)
+    # 权威校验：无论是否点过，一律以“当前是否仍有覆盖层”为准（避免误报成功）
+    engine = HdcUITestEngine(device=args.device)
+    try:
+        analyzer = engine._dump_and_load("dismiss_verify")
+    finally:
+        engine.close()
+    if analyzer is None:
+        print("❌ Failed to get widget tree")
         sys.exit(1)
     overlays = find_overlays(analyzer.widgets, analyzer.get_screen_bounds())
     analyzer.cleanup()
     if overlays:
-        print(f"❌ Unrecognized overlay dialog (no known confirm button): "
-              f"{overlays[-1].get('type', '')}")
-        print("ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=unknown overlay | "
+        top = top_overlay(overlays)
+        print(f"❌ 弹窗仍未关闭: [{top.get('type', '')}] "
+              f"{overlay_summary(analyzer.widgets, top)}")
+        print("ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=still_blocked | "
               "suggestion=use 'tree dump' to inspect, then click manually")
         sys.exit(1)
-    print("ℹ️  No dialogs to dismiss")
-    print("ACTION_VERDICT: SUCCESS | reason=no dialogs")
+    print("✅ 弹窗均已关闭")
+    print("ACTION_VERDICT: SUCCESS | reason=dialogs dismissed")
     sys.exit(0)
 
 
 def cmd_ui_wait_for(args):
     """Wait for text to appear/disappear (standalone, not bound to action)"""
     import time
-    from analyzers.widget_tree import WidgetTreeAnalyzer
 
     deadline = time.time() + args.timeout
     interval = max(args.interval, 0.5)
-    while True:
-        analyzer = WidgetTreeAnalyzer(json_file="wait_for.json", device=args.device)
-        success, _msg = analyzer.dump_layout()
-        found = False
-        if success and analyzer.load_tree():
-            matched = [w for w in analyzer.widgets
-                       if args.text.lower() in (w.get('text', '') or '').lower()
-                       or args.text.lower() in (w.get('hint', '') or '').lower()]
-            found = bool(matched)
-        analyzer.cleanup()
+    # Use engine hdc fast-path dump (was WidgetTreeAnalyzer.dump_layout -a slow path, ~5x)
+    engine = _hdc_engine(args)
+    try:
+        while True:
+            analyzer = engine._dump_and_load("wait_for")
+            found = False
+            if analyzer is not None:
+                matched = [w for w in analyzer.widgets
+                           if args.text.lower() in (w.get('text', '') or '').lower()
+                           or args.text.lower() in (w.get('hint', '') or '').lower()]
+                found = bool(matched)
+                analyzer.cleanup()
 
-        if args.gone:
-            if not found:
-                print(f"✅ Text '{args.text}' has disappeared")
-                print("ACTION_VERDICT: SUCCESS | reason=target text disappeared")
-                sys.exit(0)
-        else:
-            if found:
-                print(f"✅ Text '{args.text}' has appeared")
-                print("ACTION_VERDICT: SUCCESS | reason=target text appeared")
-                sys.exit(0)
+            if args.gone:
+                if not found:
+                    print(f"✅ Text '{args.text}' has disappeared")
+                    print("ACTION_VERDICT: SUCCESS | reason=target text disappeared")
+                    sys.exit(0)
+            else:
+                if found:
+                    print(f"✅ Text '{args.text}' has appeared")
+                    print("ACTION_VERDICT: SUCCESS | reason=target text appeared")
+                    sys.exit(0)
 
-        if time.time() >= deadline:
-            state = "still not present" if not args.gone else "still present"
-            print(f"❌ Wait timeout ({args.timeout}s): text '{args.text}' {state}")
-            print(f"ACTION_VERDICT: NO_CHANGE | reason=waited {args.timeout}s timeout | "
-                  "suggestion=check if page is loading or text is correct")
-            sys.exit(1)
-        time.sleep(interval)
+            if time.time() >= deadline:
+                state = "still not present" if not args.gone else "still present"
+                print(f"❌ Wait timeout ({args.timeout}s): text '{args.text}' {state}")
+                print(f"ACTION_VERDICT: NO_CHANGE | reason=waited {args.timeout}s timeout | "
+                      "suggestion=check if page is loading or text is correct")
+                sys.exit(1)
+            time.sleep(interval)
+    finally:
+        _close_engine(engine)
 
 
 # ==================== tree subcommands ====================
@@ -560,14 +570,18 @@ def cmd_tree_show(args):
 
 
 def cmd_tree_dump(args):
-    from analyzers.widget_tree import WidgetTreeAnalyzer
-    analyzer = WidgetTreeAnalyzer(json_file="remote_dump.json", device=args.device)
-    mode, param = _analysis_mode_param(args)
-    rw = args.rw if args.rw else 120
-    success = analyzer.dump_and_analyze(mode=mode, search_param=param,
-                                         rw=rw, rh=args.rh, as_json=args.json)
-    if not success:
-        sys.exit(1)
+    # Use engine hdc fast-path dump (was dump_and_analyze -a slow path, ~5x)
+    engine = _hdc_engine(args)
+    try:
+        analyzer = engine._dump_and_load("remote_dump")
+        if analyzer is None:
+            sys.exit(1)
+        mode, param = _analysis_mode_param(args)
+        rw = args.rw if args.rw else 120
+        analyzer._dispatch_analysis(mode, param, rw, args.rh, as_json=args.json)
+        analyzer.cleanup()
+    finally:
+        _close_engine(engine)
 
 
 def cmd_tree_diff(args):
@@ -590,39 +604,37 @@ def cmd_tree_diff(args):
 
 def cmd_tree_auto(args):
     """Auto-diff: dump current tree and compare with last baseline"""
-    from analyzers.widget_tree import WidgetTreeAnalyzer
     from engines.diff_engine import WidgetTreeDiff, AutoDiffManager
     manager = AutoDiffManager(args.history_dir)
     previous_widgets = manager.load_history()
 
-    analyzer = WidgetTreeAnalyzer(json_file="auto_diff.json", device=args.device)
-    success, msg = analyzer.dump_layout()
-    if not success:
-        print(f"❌ Failed to get widget tree: {msg}")
-        sys.exit(1)
-    print("✅ Widget tree captured")
-    print(f"📁 Temp file: {analyzer.json_file}")
-    print()
-
-    if not analyzer.load_tree():
-        analyzer.cleanup()
-        sys.exit(1)
-
-    if previous_widgets:
-        diff = WidgetTreeDiff()
-        before_route = manager.load_route_history()
-        after_route = WidgetTreeDiff.get_current_route(args.device)
-        report = diff.compare(previous_widgets, analyzer.widgets, args.operation,
-                              before_route=before_route, after_route=after_route,
-                              after_analyzer=analyzer)
-        report.print()
-    else:
-        print("ℹ️  First run, saved current tree as baseline")
+    # Use engine hdc fast-path dump (was dump_layout -a slow path, ~5x)
+    engine = _hdc_engine(args)
+    try:
+        analyzer = engine._dump_and_load("auto_diff")
+        if analyzer is None:
+            sys.exit(1)
+        print("✅ Widget tree captured")
+        print(f"📁 Temp file: {analyzer.json_file}")
         print()
 
-    current_route = WidgetTreeDiff.get_current_route(args.device)
-    manager.save_history(analyzer.widgets, route=current_route)
-    analyzer.cleanup()
+        if previous_widgets:
+            diff = WidgetTreeDiff()
+            before_route = manager.load_route_history()
+            after_route = WidgetTreeDiff.get_current_route(args.device)
+            report = diff.compare(previous_widgets, analyzer.widgets, args.operation,
+                                  before_route=before_route, after_route=after_route,
+                                  after_analyzer=analyzer)
+            report.print()
+        else:
+            print("ℹ️  First run, saved current tree as baseline")
+            print()
+
+        current_route = WidgetTreeDiff.get_current_route(args.device)
+        manager.save_history(analyzer.widgets, route=current_route)
+        analyzer.cleanup()
+    finally:
+        _close_engine(engine)
 
 
 # ==================== script subcommand ====================
@@ -865,6 +877,12 @@ def build_parser():
 
     p = ui_sub.add_parser('dismiss-dialogs', help='Dismiss overlay dialogs')
     p.add_argument('--rounds', type=int, default=3, help='Max dismiss rounds (default 3)')
+    p.add_argument('--wait', type=float, default=0.0,
+                   help='Wait N s before first check (let delayed dialog appear)')
+    p.add_argument('--grace', type=float, default=2.0,
+                   help='After clear, wait N s & recheck delayed dialog (default 2.0)')
+    p.add_argument('--back', type=int, default=1,
+                   help='Max system-back fallback presses (default 1)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_dismiss_dialogs)
 
@@ -926,6 +944,11 @@ def build_parser():
 
 
 def main():
+    try:
+        from engines.logger import init_logger
+        _LOG_FILE = init_logger("autoharmony")
+    except Exception:
+        _LOG_FILE = None
     parser = build_parser()
     args = parser.parse_args()
 
