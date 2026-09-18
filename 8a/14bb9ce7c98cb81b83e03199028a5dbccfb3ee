@@ -1,0 +1,148 @@
+autoharmony.py
+  209f9a7ccd57e916 595,651
+engines/engines.py
+  209f9a7ccd57e916 42-45,54-59,65-66,68-69,72-100,417,689,993
+engines/logger.py
+  209f9a7ccd57e916 13-19,27,31,40-49,93-115,147-203,210,228-230,233-234,236-237,251,256,260-262,269-270,273-274,277-283,285-286
+engines/verdict.py
+  209f9a7ccd57e916 491,496-497,501-504,508-509,595
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.9",
+  "base_commit_sha": "8a14bb9ce7c98cb81b83e03199028a5dbccfb3ee",
+  "prompts": {
+    "13a5498ae2030f40": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f5185533effedqDt4FfmEYiHH7",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "209f9a7ccd57e916": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4da7e1d8ffe5vb7ukUBQqit15",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 185,
+      "total_deletions": 30,
+      "accepted_lines": 185,
+      "overriden_lines": 0
+    },
+    "5d17c93731f225be": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f9a2100aeffeCDfhvHExfMzOli",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    },
+    "7e1b81a096a6e584": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4ca546e5ffeMdnnnPjyCi4c9y",
+        "model": "opencode-go/deepseek-v4.1-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 191,
+    "git_diff_deleted_lines": 31,
+    "ai_additions": 183,
+    "ai_accepted": 183,
+    "BYMC": 8,
+    "mixed_additions": 0,
+    "BYAC": 183,
+    "BYRC": 0,
+    "per_file": {
+      "autoharmony.py": {
+        "BYMC": [
+          "464",
+          "564"
+        ],
+        "BYAC": [
+          "595",
+          "651"
+        ],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [
+          "24",
+          "70-71"
+        ],
+        "BYAC": [
+          "42-45",
+          "54-59",
+          "65-66",
+          "68-69",
+          "72-100",
+          "417",
+          "689",
+          "993"
+        ],
+        "BYRC": []
+      },
+      "engines/logger.py": {
+        "BYMC": [],
+        "BYAC": [
+          "13-19",
+          "27",
+          "31",
+          "40-49",
+          "93-115",
+          "147-203",
+          "210",
+          "228-230",
+          "233-234",
+          "236-237",
+          "251",
+          "256",
+          "260-262",
+          "269-270",
+          "273-274",
+          "277-283",
+          "285-286"
+        ],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "26",
+          "31",
+          "72"
+        ],
+        "BYAC": [
+          "491",
+          "496-497",
+          "501-504",
+          "508-509",
+          "595"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1789723222,
+  "requirement_id": ""
+}
