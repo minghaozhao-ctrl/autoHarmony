@@ -461,6 +461,7 @@ def cmd_ui_dismiss_dialogs(args):
         engine.close()
     if analyzer is None:
         print("❌ Failed to get widget tree")
+        print("ACTION_VERDICT: ERROR | reason=failed_to_get_widget_tree")
         sys.exit(1)
     overlays = find_overlays(analyzer.widgets, analyzer.get_screen_bounds())
     analyzer.cleanup()
@@ -560,6 +561,7 @@ def cmd_tree_show(args):
     from analyzers.widget_tree import WidgetTreeAnalyzer
     if not os.path.exists(args.file):
         print(f"❌ File not found: {args.file}")
+        print(f"ACTION_VERDICT: ERROR | reason=file_not_found: {args.file}")
         sys.exit(1)
     analyzer = WidgetTreeAnalyzer(args.file)
     if not analyzer.load_tree():
@@ -590,6 +592,7 @@ def cmd_tree_diff(args):
     for f in (args.file1, args.file2):
         if not os.path.exists(f):
             print(f"❌ File not found: {f}")
+            print(f"ACTION_VERDICT: ERROR | reason=file_not_found: {f}")
             sys.exit(1)
     analyzer1 = WidgetTreeAnalyzer(args.file1)
     analyzer2 = WidgetTreeAnalyzer(args.file2)
@@ -645,6 +648,7 @@ def cmd_script_run(args):
         verdict = _make_verdict("FAILED", f"Script file not found: {args.file}")
         _emit_json(verdict, args)
         print(f"❌ Script file not found: {args.file}")
+        print(f"ACTION_VERDICT: ERROR | reason=script_file_not_found: {args.file}")
         sys.exit(1)
     with open(args.file, 'r', encoding='utf-8') as f:
         script = json.load(f)

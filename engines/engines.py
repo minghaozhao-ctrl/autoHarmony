@@ -21,7 +21,7 @@ from engines.diff_engine import WidgetTreeDiff, AutoDiffManager, ChangeReport
 from analyzers.crash_detector import CrashDetector
 from utils.common import run_hdc_command
 from engines.verdict import ActionPipeline
-from engines.logger import archive_dump
+from engines.logger import archive_dump, log_line
 
 
 def _import_hypium():
@@ -39,6 +39,10 @@ class _OperationTimeout(Exception):
     """操作超时异常"""
 
 
+# 设备是否支持 `dumpLayout -e uniqueId`（按设备缓存；模拟器不支持时会回退）。
+_UID_FLAG_SUPPORT = {}
+
+
 def _record_page_path(analyzer, device) -> None:
     """从 dump 的窗口节点属性提取 pagePath，登记到路由缓存（纯 hdc 零开销）。
 
@@ -47,17 +51,53 @@ def _record_page_path(analyzer, device) -> None:
     同时把本次 dump 的本地 JSON 归档进日志目录（复用产物，零额外 dump）。
     """
     try:
-        archive_dump(getattr(analyzer, '_temp_file', None) or None, "layout")
-    except Exception:
-        pass
+        dst = archive_dump(getattr(analyzer, '_temp_file', None) or None,
+                           "layout", device=device)
+        if dst:
+            log_line("[page] 本次 dump 已归档 device=%s dst=%s" % (device, dst))
+    except Exception as e:
+        log_line("[err] archive_dump: %s" % e)
     try:
         for w in analyzer.widgets:
             pp = (w.get('attributes') or {}).get('pagePath')
             if pp:
                 WidgetTreeDiff.record_page_path(device, pp)
+                # 真实 pagePath（区别于文本面包屑），落盘便于事后定位页面
+                log_line("[page] pagePath=%s device=%s" % (pp, device))
                 return
-    except Exception:
-        pass
+    except Exception as e:
+        log_line("[err] record_page_path: %s" % e)
+
+
+def _dump_layout_remote(engine, remote) -> tuple:
+    """执行 `uitest dumpLayout` 取控件树，自动兼容不支持 `-e uniqueId` 的设备。
+
+    真机 uitest 支持 `-e uniqueId`（供控件稳定配对）；部分设备（如 DevEco
+    模拟器）的 uitest 不支持该选项，会报 "unrecognized option: e" 且退出码非 0。
+    此时自动回退到不带 -e 的 dumpLayout。是否支持按设备缓存，避免每次 dump
+    都先试错一遍（省一次无效 hdc 调用）。
+
+    Returns:
+        (ok: bool, out: str)
+    """
+    dev = getattr(engine, 'device', None) or ''
+    base = ["shell", "uitest", "dumpLayout"]
+    if _UID_FLAG_SUPPORT.get(dev) is False:
+        return engine._hdc_cmd(base + ["-p", remote], timeout=30)
+
+    for attempt in range(2):
+        ok, out = engine._hdc_cmd(
+            base + ["-e", "uniqueId", "-p", remote], timeout=30)
+        if ok:
+            _UID_FLAG_SUPPORT[dev] = True
+            return ok, out
+        if "unrecognized option" in (out or ""):
+            # 该设备不支持 -e uniqueId → 永久回退并缓存
+            _UID_FLAG_SUPPORT[dev] = False
+            return engine._hdc_cmd(base + ["-p", remote], timeout=30)
+        if attempt == 0:
+            print("⚠️  dumpLayout 失败，重试 1/1 ...")
+    return ok, out
 
 
 def _guard_timeout(seconds: int):
@@ -374,7 +414,7 @@ def print_page_state_summary(analyzer, device: Optional[str] = None,
 
     # ── 路由（仅 full 模式，delta 时路由未变）──
     if route and not same_page:
-        print(f"  📍 路由: {' → '.join(route[-3:])}")
+        print(f"  📍 路由: route={' → '.join(route[-3:])}")
 
     # ── Toast（瞬时反馈，delta/full 都打）──
     for t in widgets:
@@ -646,13 +686,7 @@ class HdcUITestEngine:
         tmp_path = os.path.join(
             tempfile.gettempdir(),
             f'hdc_layout_{tag}_{int(time.time() * 1000000)}.json')
-        for attempt in range(2):
-            ok, out = self._hdc_cmd(
-                ["shell", "uitest", "dumpLayout", "-e", "uniqueId", "-p", remote], timeout=30)
-            if ok:
-                break
-            if attempt == 0:
-                print(f"⚠️  dumpLayout 失败，重试 1/1 ...")
+        ok, out = _dump_layout_remote(self, remote)
         if ok:
             rok, rout = self._hdc_cmd(
                 ["file", "recv", remote, tmp_path], timeout=30)
@@ -956,13 +990,7 @@ class HypiumEngine:
         tmp_path = os.path.join(
             tempfile.gettempdir(),
             f'hdc_layout_{tag}_{int(time.time() * 1000000)}.json')
-        for attempt in range(2):
-            ok, out = self._hdc_cmd(
-                ["shell", "uitest", "dumpLayout", "-e", "uniqueId", "-p", remote], timeout=30)
-            if ok:
-                break
-            if attempt == 0:
-                print(f"⚠️  dumpLayout 失败，重试 1/1 ...")
+        ok, out = _dump_layout_remote(self, remote)
         if ok:
             rok, rout = self._hdc_cmd(
                 ["file", "recv", remote, tmp_path], timeout=30)

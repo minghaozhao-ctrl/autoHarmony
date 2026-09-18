@@ -23,10 +23,12 @@ from enum import Enum
 from typing import Callable, List, Optional
 
 from engines.diff_engine import WidgetTreeDiff
+from engines.logger import log_line
 
 
 class VerdictStatus(Enum):
     SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
     NO_CHANGE = "NO_CHANGE"
     BLOCKED_BY_DIALOG = "BLOCKED_BY_DIALOG"
     BACK_INEFFECTIVE = "BACK_INEFFECTIVE"
@@ -67,6 +69,7 @@ class Verdict:
     def print(self):
         icon = {
             VerdictStatus.SUCCESS: "✅",
+            VerdictStatus.ERROR: "❌",
             VerdictStatus.NO_CHANGE: "⚠️",
             VerdictStatus.BLOCKED_BY_DIALOG: "🪟",
             VerdictStatus.BACK_INEFFECTIVE: "↩️",
@@ -485,16 +488,25 @@ class ActionPipeline:
             return False
 
         # 3. 执行动作
+        t0 = time.monotonic()
         try:
             raw_ok = action_fn()
         except Exception as ex:
             print(f"❌ {desc} 执行异常: {ex}")
+            Verdict(VerdictStatus.ERROR,
+                    reason="action_exception: %s" % ex).print()
             raw_ok = False
         if not raw_ok:
             print(f"❌ {desc} 执行失败")
+            log_line("[time] op=%s elapsed_ms=%d status=ERROR"
+                     % (desc, int((time.monotonic() - t0) * 1000)))
+            # 失败也必须给出结构化裁决（此前只有一句中文提示）
+            Verdict(VerdictStatus.ERROR, reason="action_failed").print()
             e.crash_detector.detect_and_report()
             return False
         print(f"✅ {desc} 执行完成")
+        log_line("[time] op=%s elapsed_ms=%d status=OK"
+                 % (desc, int((time.monotonic() - t0) * 1000)))
 
         # 4. Toast/动画稳定窗（自适应，尽早静止）
         self._settle(0.4)
@@ -580,7 +592,7 @@ class ActionPipeline:
         report = None
         if before_sig is not None and before_sig != after_sig:
             from engines.diff_engine import ChangeReport
-            print(f"🧭 页面变化: {before_sig}  ⟶  {after_sig}")
+            print(f"🧭 页面变化: breadcrumb={before_sig}  ⟶  {after_sig}")
             after.overview()
             report = ChangeReport(desc)
             report.route_changed = True
