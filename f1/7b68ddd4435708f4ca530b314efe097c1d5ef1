@@ -1,0 +1,95 @@
+autoharmony.py
+  209f9a7ccd57e916 149-150
+engines/engines.py
+  209f9a7ccd57e916 213-214,221-229,489-490
+engines/verdict.py
+  209f9a7ccd57e916 76,276-302,340-344,351-370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.9",
+  "base_commit_sha": "f17b68ddd4435708f4ca530b314efe097c1d5ef1",
+  "prompts": {
+    "13a5498ae2030f40": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f5185533effedqDt4FfmEYiHH7",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 45,
+      "total_deletions": 32,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    },
+    "209f9a7ccd57e916": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4da7e1d8ffe5vb7ukUBQqit15",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 71,
+      "total_deletions": 3,
+      "accepted_lines": 68,
+      "overriden_lines": 0
+    },
+    "5d17c93731f225be": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f9a2100aeffeCDfhvHExfMzOli",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 69,
+    "git_diff_deleted_lines": 0,
+    "ai_additions": 68,
+    "ai_accepted": 68,
+    "BYMC": 1,
+    "mixed_additions": 0,
+    "BYAC": 68,
+    "BYRC": 0,
+    "per_file": {
+      "autoharmony.py": {
+        "BYMC": [],
+        "BYAC": [
+          "149-150"
+        ],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [],
+        "BYAC": [
+          "213-214",
+          "221-229",
+          "489-490"
+        ],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "34"
+        ],
+        "BYAC": [
+          "76",
+          "276-302",
+          "340-344",
+          "351-370"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1789725699,
+  "requirement_id": ""
+}
