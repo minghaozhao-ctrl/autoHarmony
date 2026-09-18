@@ -210,12 +210,23 @@ STATE_TYPE_LABELS = {
 INPUT_TYPE_SET = {'textinput', 'textarea', 'search', 'richeditor', 'textfield'}
 # 页面内错误文案关键词（Text 控件命中即提示 AI 注意）
 ERROR_TEXT_KEYWORDS = ('失败', '错误', '异常', '不正确', '超时', '无效', '请先')
+# 说明性文案排除：如"声音异常时视频记录"是功能说明而非报错
+ERROR_TEXT_EXCLUDE = ('异常时', '错误时', '失败时', '超时时', '无效时')
 # 白屏判定：控件总数低于该值疑似白屏/未渲染完成
 WHITE_SCREEN_MIN_WIDGETS = 6
 
 
 def _state_value_text(w: dict) -> str:
     """把控件状态属性转成可读文本（checked/selected/indeterminate 等）"""
+    # 滑块：真实刻度值在 text 里（如 "60.000000"），比 checked 更有信息量
+    if (w.get('type', '') or '').lower() == 'slider':
+        txt = (w.get('text', '') or '').strip()
+        if txt:
+            try:
+                num = float(txt)
+                return str(int(num)) if num == int(num) else f"{num:g}"
+            except ValueError:
+                return txt
     checked = w.get('checked', '')
     if checked in ('true', 'false'):
         return '开' if checked == 'true' else '关'
@@ -475,6 +486,8 @@ def print_page_state_summary(analyzer, device: Optional[str] = None,
             continue
         txt = (w.get('text') or '').strip()
         if txt and any(k in txt for k in ERROR_TEXT_KEYWORDS) and len(txt) <= 50:
+            if any(x in txt for x in ERROR_TEXT_EXCLUDE):
+                continue
             err_lines.append(f"  ⚠️ 错误文案: \"{txt}\"")
             if len(err_lines) >= 3:
                 break

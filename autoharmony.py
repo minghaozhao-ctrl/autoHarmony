@@ -146,6 +146,8 @@ def _run_ui_action(args, engine, action_fn):
                             max_backs=args.auto_dialog_back)
 
     pass_expect = None if auto_dialog else expectations
+    if auto_dialog and pass_expect is None:
+        pass_expect = {'auto_dialog': True}
     ok = action_fn(pass_expect)
 
     # Record step if recording

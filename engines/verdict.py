@@ -31,6 +31,7 @@ class VerdictStatus(Enum):
     ERROR = "ERROR"
     NO_CHANGE = "NO_CHANGE"
     BLOCKED_BY_DIALOG = "BLOCKED_BY_DIALOG"
+    PENDING_DIALOG = "PENDING_DIALOG"
     BACK_INEFFECTIVE = "BACK_INEFFECTIVE"
     CRASHED = "CRASHED"
     RESTARTED = "RESTARTED"
@@ -72,6 +73,7 @@ class Verdict:
             VerdictStatus.ERROR: "❌",
             VerdictStatus.NO_CHANGE: "⚠️",
             VerdictStatus.BLOCKED_BY_DIALOG: "🪟",
+            VerdictStatus.PENDING_DIALOG: "⚠️",
             VerdictStatus.BACK_INEFFECTIVE: "↩️",
             VerdictStatus.CRASHED: "💥",
             VerdictStatus.RESTARTED: "🔄",
@@ -271,6 +273,33 @@ def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
     return _find_close_x_button(widgets, overlay)
 
 
+def overlay_dismiss_hint(widgets: List[dict], overlay: dict) -> str:
+    """在覆盖层子树内查找"可关闭语义"的文本（**不限控件类型/可点性**）。
+
+    与 find_dismiss_button 互补：后者只认 Button 类型（用于安全点击），
+    这里用于**判定"操作后是否留下未处理的确认弹窗"**——即使关闭按钮是
+    自绘 Text（非 Button），也能识别出来。返回命中文案（如 '关闭'），无则 ''。
+    """
+    from engines.engines import _is_descendant_index
+    ov_idx = None
+    for i, w in enumerate(widgets):
+        if w is overlay:
+            ov_idx = i
+            break
+    if ov_idx is None:
+        return ''
+    for label in DISMISS_BUTTONS:
+        for i in range(len(widgets)):
+            if i == ov_idx or not _is_descendant_index(widgets, i, ov_idx):
+                continue
+            txt = (widgets[i].get('text', '') or '').strip()
+            # 短文案才算按钮（避免命中含"关闭"字样的正文说明）
+            if txt and label.lower() in txt.lower() \
+                    and len(txt) <= len(label) + 6:
+                return txt
+    return ''
+
+
 # ==================== 裁决决策树 ====================
 
 def judge(crash_detector, after_analyzer, report,
@@ -308,12 +337,37 @@ def judge(crash_detector, after_analyzer, report,
 
     widgets = after_analyzer.widgets
 
+    # 覆盖层预检：用于识别"操作有变化但留下未处理弹窗"的假成功
+    screen0 = after_analyzer.get_screen_bounds() if after_analyzer else None
+    overlays0 = [ov for ov in find_overlays(widgets, screen0)
+                 if 'toast' not in (ov.get('type', '') or '').lower()]
+
     # 2. 路由变化 → 成功
     if report is not None and report.route_changed:
         return Verdict(VerdictStatus.SUCCESS, reason="路由发生变化")
 
     # 3. 控件树变化 → 成功
     if report is not None and report.changes:
+        # 期望弹窗出现（--expect-dialog）→ 弹窗出现即预期结果
+        if overlays0 and expectations and expectations.get('dialog'):
+            return Verdict(VerdictStatus.SUCCESS, reason="弹窗已按预期出现")
+        # 有变化但同时留下「可关闭的模态弹窗」→ 操作尚未最终确认，不算干净成功
+        # （--auto-handle-dialog 时弹窗会被自动清理，不在此列）
+        if overlays0 and not (expectations and expectations.get('auto_dialog')):
+            top0 = top_overlay(overlays0)
+            btn0 = find_dismiss_button(widgets, top0)
+            hint0 = (btn0.get('text', '') if btn0
+                     else overlay_dismiss_hint(widgets, top0))
+            if btn0 or hint0:
+                summary0 = overlay_summary(widgets, top0)
+                reason0 = (f"操作已产生变化，但留有未处理弹窗"
+                           f"[{top0.get('type', '')}]")
+                if summary0:
+                    reason0 += f": {summary0}"
+                return Verdict(
+                    VerdictStatus.PENDING_DIALOG, reason=reason0,
+                    suggestion=(f"确认/处理弹窗按钮 '{hint0}'"
+                                "（ui dismiss-dialogs）后复核操作结果"))
         return Verdict(VerdictStatus.SUCCESS,
                        reason=f"检测到 {len(report.changes)} 处控件变化")
 
