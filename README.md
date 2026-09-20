@@ -1,198 +1,340 @@
 # autoharmony 🎯
 
-> **The test toolchain your AI agent writes for itself.**
-> *Agent explores once, script reused forever.*
+> **为 Agent 闭环而生的 HarmonyOS UI 测试工具——不是给人写用例的。**
+> *Agent 探索一次，脚本永久复用。*
 
-[![License: MIT](https://img.shields.io/github/license/qkdndqxkr5-ctrl/autoHarmony)]()
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue)]()
-[![Stars](https://img.shields.io/github/stars/qkdndqxkr5-ctrl/autoHarmony)]()
-![Platform: HarmonyOS](https://img.shields.io/badge/platform-HarmonyOS-red)
+[![License: MIT](https://img.shields.io/github/license/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/blob/main/LICENSE) [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue)](https://github.com/minghaozhao-ctrl/autoHarmony) [![Stars](https://img.shields.io/github/stars/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/stargazers) ![Platform: HarmonyOS](https://img.shields.io/badge/platform-HarmonyOS-red)
 
-[中文文档](README_zh.md) · [Agent Guide](docs/AGENT_GUIDE.md) · [Usage](docs/USAGE.md) · [Bridge](docs/BRIDGE.md)
+[English](README_en.md) · [Agent Guide](docs/AGENT_GUIDE.md) · [用法](docs/USAGE.md) · [Bridge](docs/BRIDGE.md)
 
 ---
 
-## The problem, in one line
+## AI 帮你写鸿蒙代码。谁来跑？
 
-> AI writes your HarmonyOS code.
-> Who tests it?
-> **`autoharmony` lets the agent test its own work — and remembers how.**
+Claude Code、Cursor、Codex 们可以一天写满 ArkTS。但要在真机上验证就是另一回事：传统鸿蒙框架默认由人编写测试套件，通用 Agent 自动化又把 HarmonyOS 当成次要目标。`autoharmony` 只押 HarmonyOS——也只押 Agent 闭环。
 
-You (or an agent) explore the app once. Every action is a one-line CLI command that returns a yes/no verdict. The exploration is recorded as a reusable JSON script. Next time the code changes, just rerun the script. No human test cases. No flaky utilities. No retyping the same flow ever again.
-
-**Agent writes code → Agent tests autonomously → Script saved → Next change: just rerun**
-
----
-
-## Demo
-
-<!-- TODO: record terminal demo with asciinema and place gif here
-     Suggested: 1) script record start  2) a few ui clicks with --json
-     3) script record stop --output demo.json  4) script run demo.json
-     Put the .gif in assets/demo.gif and uncomment the line below.
-![autoharmony demo](assets/demo.gif)
--->
+`autoharmony` 把闭环合上。一个 CLI、一行一个动作、返回确定性 verdict：
 
 ```bash
-# Agent (or human) explores the app — structured verdict comes back
-$ autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
-{"status": "SUCCESS", "reason": "route changed to SettingsPage", "exit": 0}
+$ autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
+{
+  "status": "SUCCESS",
+  "reason": "Action completed",
+  "exit": 0,
+  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
+}
+```
 
-# The same flow, saved and rerun forever
+`--json` 时人类日志走 stderr，stdout 只有 JSON，可直接解析。
+
+探索 → 验证 → 录制 → 重放。探索过程自动沉淀为回归脚本。下次代码变更，`script run` 一条命令。不需要人写用例、不需要 flaky 工具、不需要把同一流程再输一遍。
+
+**Agent 写代码 → Agent 真机自主测试 → 脚本沉淀 → 改代码后一键回归**
+
+---
+
+## 真正重要的三个优势
+
+大多数 UI 工具服务的是坐在终端前的人。而 Agent 闭环有三个硬指标——**确定性、快、会解释**——`autoharmony` 就是围绕这三点做的。
+
+### 1. 结构上确定性——从不掷骰子
+
+每个动作都是一条 CLI 命令，由**选择器**（`text` / `id` / `type`）或坐标驱动，在实时控件树上解析——不是模型看截图。同样的输入，永远同样的判定。
+
+- 每条命令返回退出码 **0/1/2**（0=通过，1=失败，2=用法错误）。`--json` 额外输出结构化 `status`/`reason`/`exit`/`log_path`；位置随意（子命令前或后均可），`tree` 除外——它的 `--json` 另有「搜索结果数组」语义。
+- 两层点击兜底：先按精确 `text`/`hint` 匹配；无精确匹配时回退到包含匹配 + 坐标点击。断言在两条路径上均保留。
+- 稳定节点 ID（`uniqueId`）让 diff 正确配对，滚动/过滤不会把存量节点误报为增删。
+
+```bash
+# 机器可读、确定性 verdict —— Agent 的母语
+autoharmony --json ui click-by-text "登录" --expect-route "HomePage"
+```
+
+### 2. 快到能塞进循环里
+
+只有“重跑比不跑更划算”，回归循环才有意义。`autoharmony` 走**纯 `hdc` 直连**，没有 daemon 启动开销。
+
+| 操作 | 耗时（真机实测，随设备而异） |
+|---|---|
+| `check-exist` | **~0.6s** |
+| 单次控件树 dump | **~0.7s** |
+| `click-by-text` | **~2.6s** |
+| `dismiss-dialogs` | **~2.3s** |
+
+只读操作**亚秒级**，完整动作**个位数秒级**，纯本地、零必需运行时依赖。20 步回归跑完时，视觉模型可能还在第二步。
+
+### 3. 出问题它会告诉 Agent 哪里错了
+
+原始 UI 自动化只返回“已点击”——可如果 App 崩了、权限弹窗抢了这次点击、按钮根本没反应，这毫无意义。每个动作后，`autoharmony` 输出一行带原因的 verdict：
+
+```
+ACTION_VERDICT: SUCCESS            | reason=路由发生变化
+ACTION_VERDICT: NO_CHANGE          | reason=操作已执行但未检测到页面变化（可能被遮挡/控件不可点/已是目标状态）
+ACTION_VERDICT: BLOCKED_BY_DIALOG  | reason=操作无变化且存在覆盖层弹窗[Dialog]: 确认
+ACTION_VERDICT: PENDING_DIALOG     | reason=操作已产生变化，但留有未处理弹窗[Dialog]
+ACTION_VERDICT: BACK_INEFFECTIVE   | reason=返回后页面无变化（可能已在栈底或返回被拦截）
+ACTION_VERDICT: CRASHED            | reason=App 进程已退出或出现 faultlog
+ACTION_VERDICT: RESTARTED          | reason=accessibilityId 骤降，App 内部重启（UI 已重建）
+ACTION_VERDICT: ERROR              | reason=action_failed
+```
+
+Agent 按这行 `ACTION_VERDICT:` 的首个 token 分支。注意 `--json` 里的 `status` 只区分 `SUCCESS`/`FAILED`，上面这些细分状态在文本行里：
+
+| 状态 | Agent 动作 |
+|---|---|
+| `SUCCESS` | 继续 |
+| `BLOCKED_BY_DIALOG` | `--auto-handle-dialog` 自动兜底 |
+| `PENDING_DIALOG` | 处理残留弹窗（`ui dismiss-dialogs`）后复核 |
+| `CRASHED` / `RESTARTED` | 停止、恢复 App、上报崩溃 |
+| `ERROR` | 动作执行失败，检查选择器/设备连接 |
+| `NO_CHANGE` / `BACK_INEFFECTIVE` | 重新考虑导航 |
+
+恢复能力是内建的，不是补丁：
+
+- **弹窗自动处理** — `--auto-handle-dialog` / `ui dismiss-dialogs` 识别并点掉权限/升级/覆盖层弹窗，流程不会被弹窗卡死。
+- **崩溃检测** — 每个动作后自动抓 CppCrash / JSCrash / AppFreeze。
+- **断言轮询** — `--expect-text "成功" --timeout 10` 对 route/text/dialog/state 断言持续轮询控件树，时序敏感断言不再 flake（`--expect-no-change` 为即时判定）。
+- **失败必留证** — `ui` 动作失败时自动截屏 + 抓 `hilog` 切片到 `artifacts/`；疑似崩溃时附带 `hidumper -e`，能取到当前控件树时一并存 dump。位置通过 `--json` 的 `log_path` 与 stderr 的 `📦 失败留证: …` 交还。`--no-artifacts`（或 `HMUITEST_ARTIFACTS=0`）可关闭。
+- **全量日志留痕，零配置** — 每次运行 stdout+stderr（含 traceback）自动追加到 `~/.hmuitest/logs/uitest-YYYYMMDD.log`；会话用 `run=<id>` 关联，dump 按天归档带 pid、与操作用 `[dump]`/`[time]` 关联。事后看日志即可定位，不必重跑。
+
+---
+
+## 每个动作之后：一份差异，一份日志
+
+verdict 告诉你成/败；这两样告诉你**到底发生了什么**——不用截图、不用猜。
+
+### 自动差异比较
+
+每个 `ui` 动作前后各快照一次控件树，只报告变化的部分。路由跳转、新弹窗、文字切换，Agent 直接看到——而不是一句“已点击”。
+
+```text
+🧭 组件树变化  操作: click 设置  时间: 2026-09-18 14:05:22
+📊 新增3 · 消失0 · 位置变化12 · 文本/状态/属性2 · 遮挡0 · 解除遮挡0 · 其它0
+● 新增(3)  →  有信息量 1 条
+    + Text '语言'  [56,820][1180,900]
+● 位置变化(12)  →  合并 2 组同位移
+    ▸ 位移(+0,-120)px · 8 节点 · 如 u=abc123 Column
+PAGE_RESULT: CHANGES_DETECTED
+```
+
+- **变化分类** — 新增 / 消失 / 文本 / 位置 / 状态 / 属性 / 覆盖层出现 / 遮挡 / 解除遮挡，各自带优先级。
+- **路由变化单独成报** — 前后导航栈 + 新页面内容概览。
+- **天生精简** — 折叠结构节点、同位移合并、消失节点不给坐标、重复上报去重。
+- **按稳定 `uniqueId` 配对** — 滚动或过滤不会把存量节点误报为“删一个 + 加一个”。
+- **系统 UI 噪声过滤** — 状态栏时钟/电量等系统 UI 节点不计入 diff。
+- **机器可读结尾** — 打印结构 diff 时末行为 `PAGE_RESULT: ROUTE_CHANGED | CHANGES_DETECTED | NO_CHANGES`，Agent 无需解析散文即可分支。
+
+### 全量日志留痕，零配置
+
+每次运行把完整 stdout+stderr（含 traceback）追加到 `~/.hmuitest/logs/uitest-YYYYMMDD.log`。不用开启、不用记参数。终端输出原样不变，文件里多了时间戳和关联标识。
+
+```text
+===== autoharmony 会话开始 2026-09-18 18:08:12 | pid=48213 | run=a1b2c3d4 | cwd=... =====
+[cmd]  autoharmony ui click-by-text 设置 --expect-route SettingsPage
+[dev]  127.0.0.1:5555
+[page] --expect-route=SettingsPage
+[18:08:14.101] ACTION_VERDICT: SUCCESS | reason=路由发生变化
+[18:08:14.120] [dump] tag=before device=127.0.0.1:5555 pid=48213 size=182340B src=/data/local/tmp/layout.json dst=~/.hmuitest/logs/dump/20260918/180813.900-before-pid48213.json
+[18:08:14.910] [time] op=点击文本为 '设置' 的控件 elapsed_ms=2600 status=OK
+[18:08:15.204] [exit] rc=0
+[session] 结束 rc=0 elapsed_ms=3120
+```
+
+- **会话关联** — 每次运行分配 `run=<id>`；`[cmd]` / `[dev]` / `[page]` 开启会话，`[exit] rc=` 和 `[session]` 收尾。
+- **操作与产物绑定** — 每次控件树 dump 归档到 `dump/<YYYYMMDD>/`，带 pid 和一行 `[dump]`，“这一步当时界面长啥样”事后可查。
+- **耗时与吞掉的异常** — `[time]` 记录每个操作耗时，`[err]` 捕获被降级处理、否则会消失的异常。
+- **路径会交还给你** — `--json` 带上 `log_path`，失败时 stderr 还会打印日志文件路径，Agent 不用猜在哪。
+- **靠读日志定位，而不是反复重跑** — 日志目录用 `HMUITEST_LOG_DIR` / `HMUITEST_LOG_FILE` 覆盖，`HMUITEST_LOG=0` 关闭。
+
+---
+
+## 快速上手
+
+```bash
+git clone git@github.com:minghaozhao-ctrl/autoHarmony.git
+cd autoHarmony && pip install .
+hdc list targets                 # 确认设备已连接
+
+autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
+```
+
+完事——直接可以把 Agent 指向你的 App。`aa` / `ui` 动作 / `script` / `device` 等命令支持 `--json` 结构化输出；`tree dump` 的 `--json` 输出搜索结果数组。完整命令清单见 [docs/USAGE.md](docs/USAGE.md)。
+
+## 三十秒看懂闭环
+
+```bash
+# 1. Agent（或人）探索 App —— 结构化 verdict 直接返回
+$ autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
+{
+  "status": "SUCCESS",
+  "reason": "Action completed",
+  "exit": 0,
+  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
+}
+
+# 2. 把探索过程录成可复用回归脚本
 $ autoharmony script record start
 $ autoharmony ui click-by-text "设置"
 $ autoharmony ui click-by-text "关于"
 $ autoharmony script record stop --output settings_test.json
-$ autoharmony script run settings_test.json
-{"all_passed": true, "steps": 2, "failed": 0}
+
+# 3. 每次改完代码：重放。不用重输、不用人写用例
+$ autoharmony --json script run settings_test.json
+{
+  "status": "SUCCESS",
+  "reason": "2/2 steps passed",
+  "exit": 0,
+  "all_passed": true,
+  "passed": 2,
+  "failed": 0,
+  "total": 2,
+  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
+}
 ```
+
+某步失败了？verdict + 控件树 diff 会告诉 Agent 哪个选择器变了——`ui scroll-find`、`tree dump --overview`、改 JSON、重跑。脚本自愈，而不是人工排查。详见 [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)。
 
 ---
 
-## Quick Start
+## 对比
 
-> **Write & run your first test in under five minutes.**
+### vs. agent-device
 
-```bash
-pip install autoharmony          # or: git clone + pip install .
-hdc list targets              # verify a device is connected
+[agent-device](https://github.com/callstack/agent-device) 是最接近的邻居——同样是面向 Agent 原生的 CLI，也覆盖 HarmonyOS（通过 `hdc` + ArkUI `uitest`），且横跨众多平台。它是强大的宽面工具：九类平台、MCP + 类型化 Node.js API、worktree 会话、设备云、丰富证据。`autoharmony` 押的是更窄的一注——只做 HarmonyOS——并把深度都花在这里。
 
-autoharmony ui click-by-text "设置" --expect-route "SettingsPage" --json
+**在 HarmonyOS 上，`autoharmony` 领先的地方：**
+
+- **界面以文本抵达**——空间化字符图 + 控件符号；不用截图、不用视觉模型。
+- **弹窗与崩溃并入 verdict**——不用 Agent 自己“注意到”挡路的模态框或死掉的进程。
+- **失败必留证**——截图、`hilog`、dump 自动落进 `artifacts/`，并把日志路径交还。
+- **只依赖 Python + `hdc`**——无 daemon、无依赖，~0.6s / ~2.6s。
+
+**把界面当文本读——不截图、不用视觉模型。** `tree dump --overview` 把实时控件树渲染成一张框线字符画：边框 `┌─┐│└┘`，再用符号标注每个控件的类型——`◉` 按钮、`◆` 图标、`▦` 图片、`◐` 开关、`▏` 输入框、`░` 图片填充区。Agent 以**纯文本**读到界面的*空间*关系——谁在谁旁边、谁在右边。有弹窗时，渲染自动拆成 `【弹窗内容】` 与 `【底层内容】` 两块，Agent 一眼看清是什么盖住了页面。
+
+```text
+┌────────────────────────────────────────────┐
+│ ┌────────────────────────────────────────┐ │
+│ │设置                                      │ │
+│ └────────────────────────────────────────┘ │
+│ ┌────────────────────────────┐             │
+│ │账号与安全                       │        ◆    │
+│ └────────────────────────────┘             │
+│ ┌────────────────────────────┐      ┌────┐ │
+│ │深色模式                        │      │ ◐  │ │
+│ │                            │      └────┘ │
+│ ┌────────────────────────────┐             │
+│ │通知                          │      ┌────┐ │
+│ │                            │      │ ◐  │ │
+│ └────────────────────────────┘      └────┘ │
+│ ┌─────────────────┐ ┌────────────────────┐ │
+│ │退出登录             │ │         ▏          │ │
+│ │                 │ │                    │ │
+│ └─────────────────┘ └────────────────────┘ │
+│ ┌─────┐                                    │
+│ │░░░░░│                                    │
+│ └─────┘                                    │
+└────────────────────────────────────────────┘
 ```
 
-That's it. You're ready to point an agent at your app.
+这张空间图，是扁平的 `@eN` ref 列表给不了的。闭环的其余部分同样遵循同一原则——确定性、本地、verdict 优先：
 
----
+| HarmonyOS 深度——真正见分晓处 | autoharmony | agent-device（HarmonyOS） |
+|---|---|---|
+| **感知界面** | ✅ 空间化文本字符图 + 控件符号，全本地 | 扁平无障碍快照 / `@eN` ref |
+| **滚动查找屏外元素** | ✅ `ui scroll-find "text"` | —（先 scroll 再重新快照） |
+| **弹窗/告警处理** | ✅ 确定性、自动 | ⚠️ HarmonyOS 未宣称支持 |
+| **崩溃检测** | ✅ CppCrash / JSCrash / AppFreeze → verdict | ⚠️ HarmonyOS 未宣称支持 |
+| **动作后裁决** | ✅ 八态 + exit 0/1/2 | `--settle` 后给快照 diff |
+| **路由/状态/无变化断言** | ✅ 内置轮询 | —（有谓词，无路由断言） |
+| **覆盖层/遮挡感知** | ✅ 分层渲染 + diff 的遮挡/解除遮挡分类 | — |
+| **系统 UI 噪声过滤** | ✅ 状态栏时钟/电量不进 diff | — |
+| **失败自动留证** | ✅ 截图 + `hilog`（+ 崩溃时 faultlog）本地、零配置 | ⚠️ artifact 包（视频 / 日志 / trace） |
+| **业务层访问** | ✅ JSON-RPC bridge | —（仅界面） |
+| **运行时** | ✅ 只需 Python + `hdc`——无 daemon、无依赖，~0.6s / ~2.6s | Node.js 22.12+ + daemon |
+| **并行 Agent** | ✅ 会话级设备占用锁（无设备云） | ✅ worktree 会话、设备锁、设备云 |
 
-## Why autoharmony?
+**广度——agent-device 走得更远的地方**（多在 HarmonyOS 之外），一并列出：
 
-Two different questions need two different answers.
+| | autoharmony | agent-device |
+|---|---|---|
+| **控件树 diff** | ✅ `uniqueId` 配对、精简 | ✅ `diff snapshot` |
+| **点击 / 输入 / 等待** | ✅ | ✅ |
+| **截图 / 录像** | ✅ 截图 | ✅ 截图 + 真机录像 |
+| **应用生命周期** | 仅 Deep Link | ✅ `open` / `close` / `install` |
+| **键盘控制** | — | ✅ `keyboard enter` / `dismiss` |
+| **手势** | swipe + 方向 | ✅ `swipe` / `pan` / `fling` |
+| **设备应用日志** | — | ✅ `logs`（`hilog`） |
+| **内存 / 性能** | — | ✅ HarmonyOS 上有 RSS |
+| **MCP server / Node.js API** | — | ✅ |
+| **平台** | 只做 HarmonyOS | 9 类目标 |
 
-### vs. HarmonyOS testing today
-
-| | **autoharmony** | HMNextAuto | Hypium (official) |
-|---|---|---|---|
-| **Made for** | AI Agents | Humans writing scripts | Humans writing test suites |
-| **First test** | Agent explores in <1 min | Write tests by hand | Build a test project |
-| **Re-run after code change** | `script run test.json` | Re-run library code | Full rebuild + runner |
-| **Agent-readable output** | `--json` verdict, exit 0/1 | Human report | Human report |
-| **Exploration → regression** | Built-in recorder | No | No |
-| **Dual-engine auto-switch** | Coordinates ↔ semantic auto-detect | — | — |
-| **Crash detection** | Built-in | — | — |
-| **Auto dialog handling** | Built-in | — | — |
-| **Business-layer bridge** | JSON-RPC | — | — |
-| **Boilerplate** | Zero (one-liners) | Some | A lot |
-
-### vs. AI vision-driven automation (Midscene et al.)
+### vs. AI 视觉驱动方案（Midscene 等）
 
 | | **autoharmony** | Midscene.js |
 |---|---|---|
-| **Trigger** | Deterministic selectors (text / id / type) | Multimodal VLM reading screenshots |
-| **Determinism** | 100% — same input, same verdict, every run | Probabilistic — model-dependent |
-| **Speed** | Milliseconds per action, fully local | Seconds per action (model inference) |
-| **Auditability** | Every action → widget-tree diff + verdict line | Replay depends on current model state |
-| **Runtime deps** | None | VLM API key or self-hosted model |
-| **Crash detection** | ✅ process-level | ❌ visual models can't see it |
-| **Dialog handling** | ✅ deterministic | ⚠️ probabilistic |
-| **Business-layer access** | ✅ JSON-RPC | ❌ UI only |
+| **动作触发** | 确定性选择器（text / id / type） | 多模态模型看截图 |
+| **确定性** | 100% — 同样的输入，永远同样的判定 | 概率性 — 依赖模型 |
+| **速度** | 亚秒级，纯本地 | 秒级（模型推理） |
+| **可审计性** | 每个操作 → 控件树 diff + verdict | 重放结果取决于模型当时状态 |
+| **运行时依赖** | 无 | VLM API key 或自托管模型 |
+| **崩溃检测** | ✅ 进程级 | ❌ 视觉模型看不到进程 |
+| **弹窗处理** | ✅ 确定性 | ⚠️ 概率性 |
+| **业务层访问** | ✅ JSON-RPC | ❌ 只能操作界面 |
 
-**The honest split:** if your agent needs to *see* the UI like a human — verify colors, layout, visual polish — use a vision-driven tool. But a regression loop must be **deterministic and fast**: 100 identical runs must give 100 identical verdicts, in milliseconds, with zero flakiness. That's the half of the loop vision models will always be bad at. `autoharmony` is the fast, repeatable, auditable half — and it's the only one built for HarmonyOS.
+**实话实说：** 需要广度——九类平台、安装应用、键盘控制、设备日志、MCP/Node 工具、设备云——用 agent-device。需要像人一样*看*界面（颜色、布局、视觉还原度）——用视觉驱动方案。但要做一条**确定且快的 HarmonyOS 回归闭环**——文本字符图、`scroll-find`、弹窗自动清、崩溃并入 verdict、内置路由/状态断言、业务 bridge 一调即达，整条链路 Python + `hdc`——`autoharmony` 就是为这件事而生的。
 
-We're not here to replace Hypium either — it's a solid library. We're here for the **agent loop**: explore → verify → record → replay. That loop needs a CLI, structured output, and instant re-runs. Nobody else has it.
+> agent-device 的 HarmonyOS 覆盖范围以其 [HarmonyOS command boundary](https://oss.callstack.com/agent-device/docs/commands) 为准；具体设备请跑 `agent-device capabilities --platform harmonyos` 获取权威列表。
 
----
-
-## Features for the agent loop
-
-- **One command = one action** — click, swipe, input, assert. Always returns exit code 0/1.
-- **`--json` on everything** — agents parse verdicts directly, zero regex.
-- **Auto diff reports** — every action snapshots the widget tree before/after, so the agent sees exactly what changed (route shifts, dialogs, toggled text).
-- **Script recorder** — exploration becomes a replayable regression script. This is the whole point.
-- **Dual-engine auto-switch** — recording captures both coordinate (`ui click X Y`) and semantic (`ui click-by-text "登录"`) actions. Replay auto-detects the action type and routes to the correct engine (Hdc for coordinates, Hypium for semantic selectors) — no manual engine selection needed.
-- **Two-layer click fallback** — `click-by-text` first tries Hypium's precise `BY.text()` match; if the element isn't in the accessibility tree (e.g. dynamic labels, icons with only description), it automatically falls back to dumping the full widget tree, fuzzy-matching the text, and clicking by coordinates. Assertions are preserved through both paths.
-- **Assert polling** — `--expect-text "成功" --timeout 10` polls the widget tree for up to N seconds after the action, so timing-sensitive verifications don't flake.
-- **Verdict layer** — crash, stuck-dialog, route-change, and ineffective-action auto-detected, summarized in one line:
-  ```
-  ACTION_VERDICT: SUCCESS          | reason=route changed to LoginPage
-  ACTION_VERDICT: BLOCKED_BY_DIALOG| reason=dialog '确认' detected
-  ACTION_VERDICT: CRASHED          | reason=process died after action
-  ACTION_VERDICT: BACK_INEFFECTIVE | reason=page unchanged after back (at stack bottom)
-  ACTION_VERDICT: RESTARTED        | reason=accessibilityId dropped, app restarted
-  ```
-- **Auto dialog handling** — `ui dismiss-dialogs` / `--auto-handle-dialog` recognize and clear permission/upgrade/overlay popups so the flow never gets stuck.
-- **Smart scroll-find** — `ui scroll-find "text"` scrolls until the target appears — no fragile coordinates, no manual swipes.
-- **Widget tree inspector** — `tree dump`, `tree show`, `tree diff`, `tree auto`. DevTools for your app.
-- **Crash detector** — CppCrash / JSCrash / AppFreeze caught automatically after actions.
-- **Bridge framework** — agents can call app-side business methods over JSON-RPC.
+**适用范围说明——以上对比只针对 HarmonyOS。** 在 Android 和 iOS 上，agent-device 的后端成熟且完整：XCTest 与 Android snapshot helper、多点手势（`pan` / `pinch` / `rotate` / `transform` / `drag`）、`alert`、剪贴板、键盘、push、`logcat` / `xctrace` / Simpleperf / Perfetto 性能分析、React DevTools、录像，以及 `.apk` / `.aab` / `.app` / `.ipa` 安装。`autoharmony` 在这两个平台上完全不能跑。**如果目标平台是 Android 或 iOS，请用 agent-device。** 上表严格来说只是「两者在 HarmonyOS 上各能给什么」。
 
 ---
 
-## Command reference
+## 断言参数
 
-| Command | What it does | Agent-friendly |
-|---------|--------------|:---:|
-| `ui click X Y` | Click coordinates | `--json` |
-| `ui click-by-text "text"` | Click widget by text | `--json` |
-| `ui click-by-id "key"` | Click widget by ID | `--json` |
-| `ui swipe x1 y1 x2 y2` | Swipe gesture | `--json` |
-| `ui input "text"` | Type into focused field | `--json` |
-| `ui input-by-text "fld" "txt"` | Type into a specific field | `--json` |
-| `ui back` | Press back | `--json` |
-| `ui scroll-find "text"` | Scroll until found | `--json` |
-| `ui wait-for "text"` | Wait for text to appear | `--json` |
-| `ui screenshot path.png` | Save screenshot | `--json` |
-| `ui dismiss-dialogs` | Clear overlay dialogs | `--json` |
-| `tree dump` | Dump widget tree | `--json` |
-| `tree diff a.json b.json` | Compare two trees | `--json` |
-| `tree auto` | Diff vs last baseline | `--json` |
-| `aa start "uri://page" --bundle pkg` | Deep-link launch | `--json` |
-| `script run file.json` | Replay test script | `--json` |
-| `script record start/stop` | Record agent exploration | `--json` |
-
-Full usage in [docs/USAGE.md](docs/USAGE.md). Agent integration patterns in [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-
----
-
-## Assertions
-
-Every `ui` action supports these, so verification is a flag, not a paragraph:
+每个 `ui` **动作**命令（坐标族 click/input/swipe/back + 语义化变体）都支持这些 flag，验证是一个参数而不是一段代码：
 
 ```bash
---expect-route "SettingsPage"       # route changed?
---expect-text "保存成功"             # text appeared?
---expect-gone "加载中"               # text disappeared?
---expect-dialog                      # a dialog popped up?
---expect-no-change                   # nothing changed (regression)?
---expect-state "开关:checked=true"   # widget state check
---timeout 10                         # poll up to N seconds
---auto-handle-dialog                 # dismiss blockers automatically
+--expect-route "SettingsPage"       # 路由变了？
+--expect-text "保存成功"             # 文字出现了？
+--expect-gone "加载中"               # 文字消失了？
+--expect-dialog                      # 弹窗弹出来了？
+--expect-no-change                   # 啥都没变（回归检查，即时判定）？
+--expect-state "开关:checked=true"   # 控件状态检查
+--timeout 10                         # 对 route/text/dialog/state 轮询最多 N 秒
+--auto-handle-dialog                 # 自动关挡路的弹窗
 ```
+
+其他常用参数：`--index N`（仅 `click-by-text`，多匹配时消歧）、`--fresh-before`（强制重新取前置基线，不复用缓存）、`--no-recover`（关闭被弹窗阻塞时的自动重试）、`--no-artifacts`（失败时不抓留证）。
 
 ---
 
-## Batch scripts
+## 批量脚本
 
-One JSON file, N steps, single driver connection:
+一个 JSON 文件、N 步操作、单引擎驱动。支持两种写法：`{name, steps}` 完整脚本（`params`/`expect` 均生效），或 `script record` 产出的 `[{cmd, args}]` 录制清单（仅回放 `RECORD_ACTION_MAP` 支持的动作）。
 
 ```json
-[
-  {"cmd": "ui click-by-text", "args": ["登录"],  "expect": {"route": "LoginPage"}},
-  {"cmd": "ui input-by-text", "args": ["手机号", "13800138000"]},
-  {"cmd": "ui input-by-text", "args": ["密码",   "****"]},
-  {"cmd": "ui click-by-text", "args": ["确认"],  "expect": {"route": "MainPage"}},
-  {"cmd": "ui screenshot",    "args": ["/tmp/logged_in.png"]}
-]
+{
+  "name": "login_test",
+  "steps": [
+    {"action": "click_by_text", "params": {"text": "登录"}, "expect": {"route": "LoginPage"}},
+    {"action": "input_by_text", "params": {"target": "手机号", "text": "13800138000"}},
+    {"action": "input_by_text", "params": {"target": "密码", "text": "****"}},
+    {"action": "click_by_text", "params": {"text": "确认"}, "expect": {"route": "MainPage"}}
+  ]
+}
 ```
 
 ```bash
-autoharmony script run login_test.json --json
+autoharmony --json script run login_test.json
 ```
+
+可选 `start` / `setup` 字段做前置状态校验与恢复（`route` / `text` / `max_backs` / `recover`），详见 [docs/USAGE.md](docs/USAGE.md)。
 
 ---
 
-## Bridge framework
+## Bridge 框架
 
-Need the agent to reach into your app's business logic? `autoharmony` ships a JSON-RPC TCP bridge — login/logout, user info, business data, whatever the app registers:
+需要 Agent 触达 App 业务逻辑？`autoharmony` 自带 JSON-RPC TCP bridge——登录登出、用户信息、业务数据，App 的 TCP server 实现了什么就能调什么：
 
 ```python
 from bridge.tcp_bridge import TcpBridge
@@ -200,52 +342,51 @@ from bridge.tcp_bridge import TcpBridge
 bridge = TcpBridge("your-device-id")
 
 bridge.call("login", {"account": "13800138000"})
-info = bridge.call("getUserInfo")                  # → {"nickname": "...", "vip": true}
-devices = bridge.call("queryDevices", {"room": "客厅"})  # → {"devices": [...]}
+info = bridge.call("getUserInfo")                       # → {"nickname": "星河", "vip": true}
+devices = bridge.call("queryDevices", {"room": "客厅"}) # → {"devices": [...]}
 bridge.call("logout")
 
 bridge.close()
 ```
 
-The UI shows a "logged in" page; the session and underlying state are verified in one call.
-
-See [docs/BRIDGE.md](docs/BRIDGE.md) for the protocol and ArkTS server example.
+批量脚本里的桥接步骤需要固定方法签名；复制 `bridge/bridge_template.py` 扩展你自己的桥接类，用 `HMUITEST_BRIDGE_CLASS=your.module:YourBridge` 接入。协议与 ArkTS 服务端示例见 [docs/BRIDGE.md](docs/BRIDGE.md)。
 
 ---
 
-## Install as an Agent skill
+## 安装为你的 Agent 的 skill
 
-`autoharmony` is distributed as a standard agent skill — drop it into your coding agent, and it verifies its own HarmonyOS work:
+`autoharmony` 以标准 Agent skill 分发——丢给你的编码 Agent，它就会自己验证自己写的鸿蒙代码：
 
 ```bash
-git clone git@github.com:qkdndqxkr5-ctrl/autoHarmony.git
-cp autoHarmony/SKILL.md ~/.claude/skills/autoharmony/SKILL.md                  # Claude Code
-cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc                          # Cursor
-cp autoHarmony/SKILL.md AGENTS.md                                               # Copilot / Codex / Goose
-cp autoHarmony/SKILL.md .windsurfrules                                          # Windsurf
-cp autoHarmony/SKILL.md .clinerules                                             # Cline
+git clone git@github.com:minghaozhao-ctrl/autoHarmony.git
+cp autoHarmony/SKILL.md ~/.claude/skills/autoharmony/SKILL.md   # Claude Code
+cp autoHarmony/SKILL.md .cursor/rules/autoharmony.mdc           # Cursor
+cp autoHarmony/SKILL.md AGENTS.md                                # Copilot / Codex / Goose
+cp autoHarmony/SKILL.md .windsurfrules                           # Windsurf
+cp autoHarmony/SKILL.md .clinerules                              # Cline
 mkdir -p ~/.config/opencode/skills/autoharmony && cp autoHarmony/SKILL.md ~/.config/opencode/skills/autoharmony/SKILL.md   # opencode
 ```
 
-Per-client setup, config snippets, and the explore → record → replay loop:
+各客户端的配置细节、片段、探索 → 录制 → 重放循环：
 → [docs/agent-guides/](docs/agent-guides/)
 
-## Requirements
+## 环境要求
 
 - Python 3.9+
-- `hdc` (HarmonyOS Device Connector) in PATH
-- A HarmonyOS device over USB or network
-- Optional: `pip install autoharmony[semantic]` — semantic commands like `click-by-text` / `click-by-id` need `hypium`
+- `hdc`（HarmonyOS Device Connector）在 PATH 中
+- 一台 HarmonyOS 设备（USB 或网络连接）
 
-## Contributing
+## 贡献
 
-Issues and PRs welcome — especially new engines, better verdicts, and real-world agent integrations. See [CONTRIBUTING](docs/USAGE.md) basics.
+欢迎提 issue 和 PR——尤其是新引擎、更聪明的裁决、真实的 Agent 集成案例。
+
+---
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=qkdndqxkr5-ctrl/autoHarmony&type=Date)](https://www.star-history.com/#qkdndqxkr5-ctrl/autoHarmony&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=minghaozhao-ctrl/autoHarmony&type=Date)](https://www.star-history.com/#minghaozhao-ctrl/autoHarmony&Date)
 
-Found it useful? ⭐ Star it — it tells agents (and people) this tool works.
+好用的话 ⭐ Star 一下——让 Agent 们（和人）都知道这个工具靠谱。
 
 ---
 
