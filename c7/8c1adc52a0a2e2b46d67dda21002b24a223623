@@ -1,0 +1,321 @@
+autoharmony.py
+  209f9a7ccd57e916 1066-1068,1079-1081
+engines/engines.py
+  209f9a7ccd57e916 625-626
+utils/hdc.py
+  209f9a7ccd57e916 148
+engines/diff_engine.py
+  209f9a7ccd57e916 10,1137-1200,1202,1204-1206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.9",
+  "base_commit_sha": "c78c1adc52a0a2e2b46d67dda21002b24a223623",
+  "prompts": {
+    "13a5498ae2030f40": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f5185533effedqDt4FfmEYiHH7",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 6,
+      "accepted_lines": 15,
+      "overriden_lines": 0
+    },
+    "209f9a7ccd57e916": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4da7e1d8ffe5vb7ukUBQqit15",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 89,
+      "total_deletions": 20,
+      "accepted_lines": 80,
+      "overriden_lines": 0
+    },
+    "5d17c93731f225be": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f9a2100aeffeCDfhvHExfMzOli",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 1442,
+    "git_diff_deleted_lines": 588,
+    "ai_additions": 78,
+    "ai_accepted": 78,
+    "BYMC": 1354,
+    "mixed_additions": 0,
+    "BYAC": 78,
+    "BYRC": 0,
+    "per_file": {
+      "SKILL.md": {
+        "BYMC": [
+          "19",
+          "40-41"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "analyzers/widget_tree.py": {
+        "BYMC": [
+          "264-265",
+          "272-273",
+          "282-283",
+          "305",
+          "316-317"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "autoharmony.py": {
+        "BYMC": [
+          "11-12",
+          "20-24",
+          "35-62",
+          "66-69",
+          "75-76",
+          "81-87",
+          "173",
+          "205-211",
+          "235-236",
+          "346",
+          "348-350",
+          "355",
+          "371",
+          "384",
+          "397",
+          "410",
+          "423",
+          "437",
+          "451",
+          "467",
+          "474",
+          "481",
+          "488",
+          "495",
+          "499-500",
+          "523",
+          "533",
+          "575-577",
+          "674-675",
+          "719",
+          "767-830",
+          "840-848",
+          "864-866",
+          "877-879",
+          "929",
+          "1092-1106",
+          "1118-1178"
+        ],
+        "BYAC": [
+          "1066-1068",
+          "1079-1081"
+        ],
+        "BYRC": []
+      },
+      "bridge/bridge_template.py": {
+        "BYMC": [
+          "1-83"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "bridge/tcp_bridge.py": {
+        "BYMC": [
+          "13",
+          "16",
+          "123-125",
+          "155-186"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/BRIDGE.md": {
+        "BYMC": [
+          "59-91"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/USAGE.md": {
+        "BYMC": [
+          "41",
+          "241-271"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/agent-guides/README.md": {
+        "BYMC": [
+          "33-37"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/artifacts.py": {
+        "BYMC": [
+          "1-167"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/diff_engine.py": {
+        "BYMC": [
+          "528-541",
+          "812-821",
+          "938-944"
+        ],
+        "BYAC": [
+          "10",
+          "1137-1200",
+          "1202",
+          "1204-1206"
+        ],
+        "BYRC": []
+      },
+      "engines/engines.py": {
+        "BYMC": [
+          "6-9",
+          "632-633",
+          "644",
+          "646-647",
+          "757",
+          "760",
+          "801",
+          "812",
+          "823",
+          "834",
+          "845",
+          "857",
+          "860-861",
+          "863-864",
+          "868",
+          "900",
+          "970",
+          "1004",
+          "1049",
+          "1059-1064",
+          "1094",
+          "1103-1105",
+          "1123-1125",
+          "1143-1145",
+          "1155",
+          "1159",
+          "1170",
+          "1173-1175",
+          "1188",
+          "1191-1193",
+          "1202-1218",
+          "1226-1230",
+          "1235-1250",
+          "1274-1289",
+          "1297-1299",
+          "1301-1303",
+          "1334",
+          "1336",
+          "1414-1415",
+          "1419-1424",
+          "1650",
+          "1755",
+          "1809",
+          "1823-1825",
+          "1852",
+          "2051-2054",
+          "2066",
+          "2084-2100",
+          "2109",
+          "2172",
+          "2181-2200",
+          "2294-2301"
+        ],
+        "BYAC": [
+          "625-626"
+        ],
+        "BYRC": []
+      },
+      "engines/logger.py": {
+        "BYMC": [
+          "50-51",
+          "163-169",
+          "219",
+          "256",
+          "266-273"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "86-88",
+          "405-409",
+          "414",
+          "426-427",
+          "478-497",
+          "534",
+          "554",
+          "573",
+          "587",
+          "607",
+          "614-617",
+          "639-641",
+          "687-689",
+          "692-713"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "pyproject.toml": {
+        "BYMC": [
+          "12"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "requirements.txt": {
+        "BYMC": [
+          "1"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/device_lock.py": {
+        "BYMC": [
+          "1-387"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/hdc.py": {
+        "BYMC": [
+          "17-27",
+          "32",
+          "41",
+          "65-69",
+          "71-95",
+          "97-108",
+          "110"
+        ],
+        "BYAC": [
+          "148"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1789877505,
+  "requirement_id": ""
+}
