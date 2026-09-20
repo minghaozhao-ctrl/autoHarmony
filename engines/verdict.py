@@ -83,15 +83,9 @@ class Verdict:
 
 # ==================== 桌面/应用内识别（供返回护栏共用） ====================
 
-# 系统 UI bundle（桌面/状态栏/锁屏等），widget 树中仅含这些 bundle 时视为已退到桌面
-SYSTEM_UI_BUNDLES = {
-    'com.ohos.sceneboard',  # HarmonyOS 桌面（SCBDesktop）
-    'com.ohos.settings',
-    'com.ohos.note',
-    'com.huawei.hmos.settings',
-    'com.huawei.hmos.launcher',
-    'com.huawei.hmos.sceneboard',
-}
+# 系统 UI bundle（桌面/状态栏/锁屏等），widget 树中仅含这些 bundle 时视为已退到桌面。
+# 单一事实来源：diff_engine.WidgetTreeDiff.SYSTEM_UI_BUNDLES（此处引用，勿再各自拷贝）
+SYSTEM_UI_BUNDLES = set(WidgetTreeDiff.SYSTEM_UI_BUNDLES)
 
 
 def widgets_have_app_content(widgets: List[dict]) -> bool:
@@ -408,11 +402,16 @@ def judge(crash_detector, after_analyzer, report,
 # 复用历史基准的新鲜度阈值（秒）：超过则不信任，强制 fresh dump
 HISTORY_FRESH_SECONDS = 120
 
+# 空 diff 确认复查的等待时长（秒）：动作后 UI 可能尚未稳定，单次 dump 会
+# 误判 NO_CHANGE/假阴性。状态控件异步生效更慢，给更长等待。
+RECHECK_EMPTY_WAIT = 0.8
+RECHECK_STATE_WAIT = 1.5
+
 
 class ActionPipeline:
     """统一动作管线：前置快照 → 动作 → 后置快照 → 裁决 → 自愈 → 断言
 
-    两个引擎（HdcUITestEngine / HypiumEngine）通过 duck typing 复用本管线，
+    两个引擎（HdcUITestEngine / SemanticEngine）通过 duck typing 复用本管线，
     只需提供：_dump_and_load / _save_and_cleanup / manager / diff /
     crash_detector / device / _get_current_route_cached。
 
@@ -424,16 +423,8 @@ class ActionPipeline:
         self.auto_recover = auto_recover
 
     def _settle(self, timeout: float = 0.4):
-        """自适应 UI 稳定窗：**仅当 daemon 已连接**时用 wait_for_idle（动画/滚动
-        尽早静止即返回，实测空跑约 0.1s）；否则回退固定 sleep(timeout)。
-        注意：不能在此处新建 hypium 连接（约 2.3s），否则得不偿失。"""
-        drv = getattr(self.engine, "_driver", None)
-        if drv is not None and hasattr(drv, "wait_for_idle"):
-            try:
-                drv.wait_for_idle(idle_time=0.1, timeout=timeout)
-                return
-            except Exception:
-                pass
+        """UI 稳定窗：固定等待 timeout 秒，让 Toast/动画/惯性滚动先停下来。
+        （纯 hdc 无 idle 检测 API；如后续需要，可改为对连续两次 dump 做指纹比对。）"""
         time.sleep(timeout)
 
     # ---- 前置快照（支持复用历史基准，省一次 dump）----
@@ -484,6 +475,26 @@ class ActionPipeline:
             return True
         return saved == current
 
+    def _capture_failure(self, reason: str, analyzer=None, crash: bool = False):
+        """失败留证（截屏/hilog/崩溃/dump）。
+
+        每次 run 至多一次（engine 上打标记），且任何异常都吞掉——留证绝不能
+        影响主流程或改变退出码。
+        """
+        e = self.engine
+        if getattr(e, '_artifacts_captured', False):
+            return
+        try:
+            from engines.artifacts import capture_failure
+            capture_failure(getattr(e, 'device', None), reason,
+                            analyzer=analyzer, crash=crash)
+        except Exception:
+            pass
+        try:
+            e._artifacts_captured = True
+        except Exception:
+            pass
+
     # ---- 主流程 ----
 
     def run(self, action_fn: Callable[[], bool], desc: str,
@@ -520,6 +531,7 @@ class ActionPipeline:
             before_widgets, before_route, before_sig, _reused = \
                 self._before_snapshot(skip_before=False, fresh_before=fresh_before)
             if before_widgets is None:
+                self._capture_failure("before dump failed", crash=True)
                 return False
 
         # 2. 崩溃基线 + 记录操作前 acc
@@ -539,6 +551,7 @@ class ActionPipeline:
                        + ")",
                 suggestion="当前已无 App 内容，如需回到 App 请用 app navigate 或 aa start 启动")
             verdict.print()
+            self._capture_failure("back ineffective: already on desktop")
             return False
 
         # 3. 执行动作
@@ -557,6 +570,7 @@ class ActionPipeline:
             # 失败也必须给出结构化裁决（此前只有一句中文提示）
             Verdict(VerdictStatus.ERROR, reason="action_failed").print()
             e.crash_detector.detect_and_report()
+            self._capture_failure("action_failed", crash=True)
             return False
         print(f"✅ {desc} 执行完成")
         log_line("[time] op=%s elapsed_ms=%d status=OK"
@@ -570,6 +584,7 @@ class ActionPipeline:
             before_widgets, before_route, before_sig, desc,
             is_back, check_exit, expectations)
         if after is None:
+            self._capture_failure("after dump failed", crash=True)
             return False
 
         # 自愈：被弹窗挡住时清弹窗并重试一次
@@ -589,11 +604,17 @@ class ActionPipeline:
                     before_widgets, before_route, before_sig,
                     f"{desc} [自愈重试]", is_back, check_exit, expectations)
                 if after is None:
+                    self._capture_failure("after dump failed (retry)", crash=True)
                     return False
 
         # 6. 输出裁决结论
         print()
         verdict.print()
+
+        # 6.5 失败留证（在 cleanup 之前，保证 dump 可归档）
+        if not verdict.ok(expectations):
+            self._capture_failure("verdict=%s" % verdict.status.value,
+                                  analyzer=after)
 
         # 7. 页面状态摘要 + 保存历史
         same_page = None
@@ -615,6 +636,9 @@ class ActionPipeline:
                     cleanup_fn=lambda a: a.cleanup(),
                     device=e.device):
                 ok = False
+        if not ok:
+            # 断言失败（裁决本身成功）也要留证
+            self._capture_failure("assertions failed", analyzer=after)
         return ok
 
     def _verdict_once(self, before_widgets, before_route, before_sig,
@@ -660,29 +684,33 @@ class ActionPipeline:
                         internal_restarted=internal_restarted,
                         expectations=expectations)
 
-        # Toggle 异步生效复查：无变化且页面有状态控件时延迟复查一次
+        # 无变化时补一次“确认 dump”：动作后 UI 可能尚未稳定（页面切换/异步
+        # 渲染），单次 dump 会把“其实已生效”误判为 NO_CHANGE（假阴性）。状态
+        # 控件异步生效更慢，给更长等待；其余空 diff 给短等待。
         if verdict.status in (VerdictStatus.NO_CHANGE,
                               VerdictStatus.BACK_INEFFECTIVE):
-            if self._has_state_controls(after.widgets):
-                print("⏳ 检测到状态控件，1.5s 后复查是否异步生效...")
-                # 单次复查（异步更新场景需完整等待；早退轮询会多付一次 dump，
-                # 在无变化主路径上反而更慢，故维持单次检查）
-                time.sleep(1.5)
-                recheck = e._dump_and_load("recheck")
-                if recheck is not None:
-                    re_report = e._compare_with_history(recheck, f"{desc} [异步复查]")
-                    if re_report is not None and (re_report.changes
-                                                  or re_report.route_changed):
-                        print("✅ 操作延迟生效（状态异步更新），以复查结果为准")
-                        recheck_route = e._get_current_route_cached()
-                        verdict = judge(e.crash_detector, recheck, re_report,
-                                        before_route, recheck_route,
-                                        is_back=is_back,
-                                        looks_like_desktop=looks_like_desktop,
-                                        expectations=expectations)
-                        after.cleanup()
-                        return verdict, recheck, re_report
-                    recheck.cleanup()
+            has_state = self._has_state_controls(after.widgets)
+            wait_s = RECHECK_STATE_WAIT if has_state else RECHECK_EMPTY_WAIT
+            if has_state:
+                print("⏳ 检测到状态控件，%ss 后复查是否异步生效..." % wait_s)
+            else:
+                print("⏳ 空 diff，%ss 后补一次确认 dump（排除异步未稳定）..." % wait_s)
+            time.sleep(wait_s)
+            recheck = e._dump_and_load("recheck")
+            if recheck is not None:
+                re_report = e._compare_with_history(recheck, f"{desc} [确认复查]")
+                if re_report is not None and (re_report.changes
+                                              or re_report.route_changed):
+                    print("✅ 复查检测到变化（此前为异步未稳定），以复查结果为准")
+                    recheck_route = e._get_current_route_cached()
+                    verdict = judge(e.crash_detector, recheck, re_report,
+                                    before_route, recheck_route,
+                                    is_back=is_back,
+                                    looks_like_desktop=looks_like_desktop,
+                                    expectations=expectations)
+                    after.cleanup()
+                    return verdict, recheck, re_report
+                recheck.cleanup()
 
         return verdict, after, report
 

@@ -56,6 +56,39 @@ bridge.register("queryDevices", handle_query_devices)
 result = bridge.call("login", {"phone": "13800138000"})
 ```
 
+## Batch Bridge Steps
+
+`script run` scripts may contain bridge actions (`navigate`, `navigate_back`,
+`login`, `logout`, `get_user_info`, `get_route`, `query_devices`,
+`click_device_card`). Unlike the generic `call()` above, these are **interface
+methods** the runner invokes directly, so your bridge class must define them
+with fixed signatures and return shapes:
+
+| action | method | returns |
+|---|---|---|
+| `navigate` | `navigate(page, nav_params=None)` | `{"success": bool, "message"?: str}` |
+| `navigate_back` | `navigate_back()` | `{"success": bool}` |
+| `login` | `login(phone)` | `{"success": bool, "message"?: str}` |
+| `logout` | `logout()` | `{"success": bool}` |
+| `get_user_info` | `get_user_info()` | `dict` |
+| `get_route` | `get_current_route()` | `list[str]` |
+| `query_devices` | `query_devices(**filters)` | `{"success": bool, "devices": [...], "totalCount": int}` |
+| `click_device_card` | `click_device_card(name)` | `{"success": bool, "message"?: str}` |
+
+Copy `bridge/bridge_template.py`, implement the methods you need (map them to
+your app's real JSON-RPC methods with `self.call(...)`), then point autoharmony
+at your subclass:
+
+```bash
+HMUITEST_BRIDGE_CLASS=myproject.bridge:DigitalHomeBridge \
+  autoharmony script run plan.json
+```
+
+The framework does **not** ship concrete business methods — that is intentional.
+Missing methods fail cleanly (`ACTION_VERDICT: ERROR | reason=bridge_action_unsupported`),
+and connection/RPC errors are downgraded to a step failure
+(`reason=bridge_call_failed`); neither aborts the whole script.
+
 ## JSON-RPC 2.0 Protocol
 
 Requests:

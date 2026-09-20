@@ -9,7 +9,7 @@ description = "HarmonyOS UI testing toolchain for AI agents. Agent explores once
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-keywords = ["harmonyos", "ui-testing", "ai-agent", "automation", "hypium", "uitest"]
+keywords = ["harmonyos", "ui-testing", "ai-agent", "automation", "uitest"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -20,9 +20,6 @@ classifiers = [
 
 [project.scripts]
 autoharmony = "autoharmony:main"
-
-[project.optional-dependencies]
-semantic = ["hypium"]
 
 [tool.setuptools]
 py-modules = ["autoharmony"]

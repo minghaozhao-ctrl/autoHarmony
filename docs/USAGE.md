@@ -38,7 +38,7 @@ python3 autoharmony.py ui input "hello world"
 python3 autoharmony.py ui back
 ```
 
-### Semantic (HypiumEngine)
+### Semantic (widget-tree matching)
 
 ```bash
 # Click by text (fuzzy match)
@@ -237,6 +237,38 @@ python3 autoharmony.py tree dump
 python3 autoharmony.py tree dump --device DEVICE_SERIAL
 python3 autoharmony.py tree dump -d DEVICE_SERIAL
 ```
+
+### Device claims (parallel sessions)
+
+When several agents/worktrees share one host and one device, each command registers a
+session-scoped **device claim** so two sessions can't drive the same device at once.
+Without a daemon, liveness is a heartbeat TTL (default 900s; `HMUITEST_CLAIM_TTL`).
+
+```bash
+# See which session holds which device (live vs stale)
+python3 autoharmony.py device status
+python3 autoharmony.py --json device status
+
+# Release claims
+python3 autoharmony.py device release            # this session's claims
+python3 autoharmony.py device release --stale    # only expired ones
+python3 autoharmony.py device release --all      # everything
+
+# When busy, wait or take over instead of failing
+python3 autoharmony.py --device-wait 60 ui click-by-text "设置"
+python3 autoharmony.py --device-takeover ui click-by-text "设置"
+python3 autoharmony.py --no-device-lock ui click-by-text "设置"
+```
+
+| Env var | Meaning |
+|---|---|
+| `HMUITEST_SESSION_ID` | Explicit session name; `0/off/false/no/none/-` disables locking |
+| `HMUITEST_DEVICE_LOCK` | `enforce` (default) or `off` |
+| `HMUITEST_CLAIM_TTL` | Heartbeat expiry in seconds (default `900`) |
+| `HMUITEST_CLAIM_DIR` | Claim directory (default `~/.hmuitest/device-claims`) |
+
+Session is auto-derived: `HMUITEST_SESSION_ID` → agent conversation dir → git worktree
+root (else `cwd`). A claim older than the TTL is stale and gets taken over with a warning.
 
 ## CI Integration
 

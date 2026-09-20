@@ -8,13 +8,20 @@ Subcommands (mutually exclusive):
   tree     Widget tree analysis (local file / remote dump / diff)
   script   Batch script execution (single-process driver reuse)
 
-Exit code: 0 success, 1 failure (CI / agent friendly).
+Exit codes: 0 success, 1 failure (rule/assertion/action), 2 usage error
+(bad args, e.g. unknown command or misplaced flag) — CI / agent friendly.
 """
 
 import argparse
 import json
 import os
 import sys
+
+# 约定的退出码（对 Agent/CI 稳定）：
+#   0 成功；1 动作/断言/裁决失败；2 命令行用法错误（argparse 默认）。
+EXIT_OK = 0
+EXIT_FAIL = 1
+EXIT_USAGE = 2
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if SKILL_DIR not in sys.path:
@@ -25,19 +32,59 @@ RECORD_FILE = os.path.join(SKILL_DIR, ".autoharmony_recording.json")
 
 # ==================== JSON Output ====================
 
+# json 模式下人类输出改走 stderr，真正的 JSON 只写这里（默认 stdout）。
+# main() 启动时记下当前 stdout，再把 sys.stdout 指向 stderr。
+_JSON_STDOUT = None
+
+
+def _write_json(obj: dict) -> None:
+    """把 JSON 写到真正的 stdout（json 模式下不受人类输出重定向影响）。"""
+    out = _JSON_STDOUT or sys.stdout
+    out.write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
+    try:
+        out.flush()
+    except Exception:
+        pass
+
+
+def _attach_log_path(result: dict) -> dict:
+    """把当前日志文件路径注入结果（缺失时），便于 Agent 事后定位完整日志。"""
+    if "log_path" not in result:
+        try:
+            from engines.logger import current_log_path
+            path = current_log_path()
+        except Exception:
+            path = None
+        if path:
+            result["log_path"] = path
+    return result
+
+
 def _emit_json(result: dict, args=None):
     """Emit structured JSON output and exit."""
     if args and getattr(args, 'json_output', False):
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        sys.exit(result.get("exit", 0 if result.get("status") == "SUCCESS" else 1))
+        _attach_log_path(result)
+        _write_json(result)
+        sys.exit(result.get("exit", EXIT_OK if result.get("status") == "SUCCESS"
+                            else EXIT_FAIL))
     return result
 
 
 def _make_verdict(status: str, reason: str, **extra) -> dict:
     """Build a standard verdict dict."""
-    d = {"status": status, "reason": reason, "exit": 0 if status == "SUCCESS" else 1}
+    d = {"status": status, "reason": reason,
+         "exit": EXIT_OK if status == "SUCCESS" else EXIT_FAIL}
     d.update(extra)
     return d
+
+
+def _capture_cmd_failure(device, reason: str):
+    """独立命令（非裁决管线）的失败留证；绝不影响主流程。"""
+    try:
+        from engines.artifacts import capture_failure
+        capture_failure(device, reason)
+    except Exception:
+        pass
 
 
 def _record_step(cmd: str, args_list: list):
@@ -123,7 +170,7 @@ def _add_expect_args(p):
 
 
 def _close_engine(engine):
-    """Close engine (release HypiumEngine driver connection)"""
+    """Close engine (release resources if the engine has a close())"""
     if hasattr(engine, 'close'):
         engine.close()
 
@@ -155,6 +202,13 @@ def _run_ui_action(args, engine, action_fn):
         _record_step(getattr(args, '_record_cmd', ''), getattr(args, '_record_args', []))
 
     if not ok:
+        # 兜底：引擎未走裁决管线/未留证时补一次
+        if not getattr(engine, '_artifacts_captured', False):
+            _capture_cmd_failure(args.device, "action failed")
+            try:
+                engine._artifacts_captured = True
+            except Exception:
+                pass
         verdict = _make_verdict("FAILED", "Action failed")
         _emit_json(verdict, args)
         return False
@@ -178,8 +232,8 @@ def _run_ui_action(args, engine, action_fn):
 # ==================== aa subcommand ====================
 
 def cmd_aa_start(args):
-    from engines.engines import HypiumEngine
-    engine = HypiumEngine(device=args.device,
+    from engines.engines import SemanticEngine
+    engine = SemanticEngine(device=args.device,
                           history_dir=getattr(args, 'history_dir', None))
     params = json.loads(args.params) if args.params else None
     args._record_cmd = "aa start"
@@ -289,16 +343,16 @@ def cmd_ui_back(args):
     sys.exit(0 if ok else 1)
 
 
-# ==================== ui subcommands (semantic, HypiumEngine) ====================
+# ==================== ui subcommands (semantic, SemanticEngine) ====================
 
-def _hypium_engine(args):
-    from engines.engines import HypiumEngine
-    return HypiumEngine(device=args.device,
+def _semantic_engine(args):
+    from engines.engines import SemanticEngine
+    return SemanticEngine(device=args.device,
                         history_dir=getattr(args, 'history_dir', None))
 
 
 def cmd_ui_click_by_text(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     args._record_cmd = "ui click-by-text"
     args._record_args = [args.text]
 
@@ -314,7 +368,7 @@ def cmd_ui_click_by_text(args):
 
 
 def cmd_ui_click_by_id(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.click_by_id(args.key, args.operation, expectations=expectations,
@@ -327,7 +381,7 @@ def cmd_ui_click_by_id(args):
 
 
 def cmd_ui_click_by_type(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.click_by_type(args.type, args.operation, expectations=expectations,
@@ -340,7 +394,7 @@ def cmd_ui_click_by_type(args):
 
 
 def cmd_ui_double_click_by_text(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.double_click_by_text(args.text, args.operation, expectations=expectations,
@@ -353,7 +407,7 @@ def cmd_ui_double_click_by_text(args):
 
 
 def cmd_ui_long_click_by_text(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.long_click_by_text(args.text, args.operation, expectations=expectations,
@@ -366,7 +420,7 @@ def cmd_ui_long_click_by_text(args):
 
 
 def cmd_ui_input_by_text(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.input_by_text(args.target, args.text, args.operation,
@@ -380,7 +434,7 @@ def cmd_ui_input_by_text(args):
 
 
 def cmd_ui_input_by_type(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.input_by_type(args.type, args.text, args.operation,
@@ -394,7 +448,7 @@ def cmd_ui_input_by_type(args):
 
 
 def cmd_ui_swipe_direction(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
 
     def action(expectations):
         return engine.swipe_direction(args.direction, args.distance, args.operation,
@@ -410,38 +464,40 @@ def cmd_ui_swipe_direction(args):
 # ==================== ui subcommands (check/screenshot, no history) ====================
 
 def cmd_ui_screenshot(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     ok = engine.screenshot(args.path)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
 
 
 def cmd_ui_check_dialog(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     ok = engine.check_dialog(args.type)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
 
 
 def cmd_ui_check_exist(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     ok = engine.check_component(text=args.text, key=args.id, widget_type=args.type)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
 
 
 def cmd_ui_find(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     ok = engine.find_and_print(text=args.text, key=args.id, widget_type=args.type)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
 
 
 def cmd_ui_scroll_find(args):
-    engine = _hypium_engine(args)
+    engine = _semantic_engine(args)
     args._record_cmd = "ui scroll-find"
     args._record_args = [args.text]
     ok = engine.scroll_find(args.text, max_swipes=args.swipes)
+    if not ok:
+        _capture_cmd_failure(args.device, "scroll_find not found: %s" % args.text)
     verdict = _make_verdict("SUCCESS" if ok else "FAILED",
                             f"Found '{args.text}'" if ok else f"'{args.text}' not found after {args.swipes} swipes")
     _emit_json(verdict, args)
@@ -464,6 +520,7 @@ def cmd_ui_dismiss_dialogs(args):
     if analyzer is None:
         print("❌ Failed to get widget tree")
         print("ACTION_VERDICT: ERROR | reason=failed_to_get_widget_tree")
+        _capture_cmd_failure(args.device, "dismiss-dialogs: failed to get widget tree")
         sys.exit(1)
     overlays = find_overlays(analyzer.widgets, analyzer.get_screen_bounds())
     analyzer.cleanup()
@@ -473,6 +530,7 @@ def cmd_ui_dismiss_dialogs(args):
               f"{overlay_summary(analyzer.widgets, top)}")
         print("ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=still_blocked | "
               "suggestion=use 'tree dump' to inspect, then click manually")
+        _capture_cmd_failure(args.device, "dismiss-dialogs: overlay still present")
         sys.exit(1)
     print("✅ 弹窗均已关闭")
     print("ACTION_VERDICT: SUCCESS | reason=dialogs dismissed")
@@ -514,6 +572,9 @@ def cmd_ui_wait_for(args):
                 print(f"❌ Wait timeout ({args.timeout}s): text '{args.text}' {state}")
                 print(f"ACTION_VERDICT: NO_CHANGE | reason=waited {args.timeout}s timeout | "
                       "suggestion=check if page is loading or text is correct")
+                _capture_cmd_failure(
+                    args.device,
+                    "wait_for timeout (%ss): %s" % (args.timeout, args.text))
                 sys.exit(1)
             time.sleep(interval)
     finally:
@@ -610,7 +671,8 @@ def cmd_tree_diff(args):
 def cmd_tree_auto(args):
     """Auto-diff: dump current tree and compare with last baseline"""
     from engines.diff_engine import WidgetTreeDiff, AutoDiffManager
-    manager = AutoDiffManager(args.history_dir)
+    manager = AutoDiffManager(getattr(args, 'history_dir', None),
+                              device=getattr(args, 'device', None))
     previous_widgets = manager.load_history()
 
     # Use engine hdc fast-path dump (was dump_layout -a slow path, ~5x)
@@ -654,7 +716,7 @@ def cmd_script_run(args):
         sys.exit(1)
     with open(args.file, 'r', encoding='utf-8') as f:
         script = json.load(f)
-    runner = BatchRunner(device=args.device, history_dir=args.history_dir)
+    runner = BatchRunner(device=args.device, history_dir=getattr(args, 'history_dir', None))
     result = runner.run(script)
     verdict = _make_verdict("SUCCESS" if result['all_passed'] else "FAILED",
                             f"{result.get('passed', 0)}/{result.get('total', 0)} steps passed",
@@ -702,6 +764,70 @@ def cmd_script_record(args):
         _emit_json(verdict, args)
 
 
+# ==================== device subcommand ====================
+
+def _device_lock_module():
+    try:
+        from utils import device_lock
+    except ImportError:
+        import device_lock  # skill 侧扁平导入
+    return device_lock
+
+
+def cmd_device_status(args):
+    lock = _device_lock_module()
+    me = lock.resolve_session_id()
+    claims = lock.list_claims()
+    if getattr(args, 'json_output', False):
+        _write_json(_attach_log_path({
+            "session": me,
+            "locked": lock.lock_enabled(),
+            "claim_dir": lock.claim_dir(),
+            "claims": claims,
+        }))
+        sys.exit(0)
+    print(f"会话: {me or '(设备锁已关闭)'}")
+    print(f"声明目录: {lock.claim_dir()}")
+    if not claims:
+        print("当前无设备占用")
+        return
+    for c in claims:
+        state = "活跃" if c["live"] else "过期"
+        mine = "  ← 本会话" if me and c["session"] == me else ""
+        print(f"  • {c['device']}  会话={c['session']}  {state}  "
+              f"心跳 {c['age_s']}s 前  pid={c['pid']}{mine}")
+
+
+def cmd_device_release(args):
+    lock = _device_lock_module()
+    me = lock.resolve_session_id()
+    if args.release_all:
+        device, session, stale_only = None, None, False
+    elif args.stale:
+        device, session, stale_only = args.device, None, True
+    elif args.device or args.session:
+        device, session, stale_only = args.device, args.session, False
+    else:
+        device, session, stale_only = None, me, False
+    if not (args.release_all or args.stale or args.device or args.session) and not me:
+        verdict = _make_verdict("FAILED", "设备锁已关闭，且未指定 --device/--session")
+        _emit_json(verdict, args)
+        print("无本会话声明可释放（设备锁已关闭）")
+        sys.exit(1)
+    removed = lock.release(device=device, session=session, stale_only=stale_only)
+    verdict = _make_verdict("SUCCESS",
+                            f"released {len(removed)} claim(s)",
+                            released=len(removed),
+                            claims=[{"device": c.get("device"),
+                                     "session": c.get("session")} for c in removed])
+    _emit_json(verdict, args)
+    if not removed:
+        print("没有匹配的设备声明")
+        return
+    for c in removed:
+        print(f"✅ 释放 {c.get('device')}（会话 {c.get('session')}）")
+
+
 # ==================== parser ====================
 
 def build_parser():
@@ -711,6 +837,15 @@ def build_parser():
                     'UI actions & assertions, widget tree analysis, batch scripts.')
     parser.add_argument('--json', dest='json_output', action='store_true',
                         help='Output structured JSON (for AI agents)')
+    parser.add_argument('--no-artifacts', dest='no_artifacts', action='store_true',
+                        help='Disable failure evidence capture '
+                             '(screenshot/hilog/dump; default on)')
+    parser.add_argument('--device-wait', type=float, default=None, metavar='SEC',
+                        help='Wait up to SEC seconds for a device held by another session')
+    parser.add_argument('--device-takeover', action='store_true',
+                        help='Forcefully take over a device held by another live session')
+    parser.add_argument('--no-device-lock', action='store_true',
+                        help='Disable session device-claim locking for this command')
     sub = parser.add_subparsers(dest='command', metavar='<command>', required=True)
 
     # ---------- aa ----------
@@ -726,7 +861,9 @@ def build_parser():
     p.add_argument('--params', default=None,
                    help='Extra params JSON')
     p.add_argument('--history-dir', default=None,
-                   help='Diff history directory (default: system temp)')
+                   help='Base dir for diff baseline; actual files go to a per-device '
+                        'subdir (default $TMPDIR/hmuitest-history/<device>; '
+                        'override base with env HMUITEST_HISTORY_DIR)')
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_aa_start)
@@ -737,7 +874,9 @@ def build_parser():
 
     def add_history(p):
         p.add_argument('--history-dir', default=None,
-                       help='Diff history directory (default: system temp)')
+                       help='Base dir for diff baseline; actual files go to a per-device '
+                        'subdir (default $TMPDIR/hmuitest-history/<device>; '
+                        'override base with env HMUITEST_HISTORY_DIR)')
 
     # Coordinate-based (HdcUITestEngine)
     p = ui_sub.add_parser('click', help='Click at coordinates')
@@ -787,7 +926,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_back)
 
-    # Semantic (HypiumEngine)
+    # Semantic (SemanticEngine)
     p = ui_sub.add_parser('click-by-text', help='Click widget by text (fuzzy match on exact fail)')
     p.add_argument('text', help='Widget text')
     p.add_argument('--index', type=int, default=None,
@@ -924,7 +1063,9 @@ def build_parser():
     p = tree_sub.add_parser('auto', help='Auto-diff: dump and compare with last baseline')
     p.add_argument('--operation', default="", help='Operation description')
     p.add_argument('--history-dir', default=None,
-                   help='History directory (default: system temp)')
+                   help='Base dir for history baseline; actual files go to a per-device '
+                        'subdir (default $TMPDIR/hmuitest-history/<device>; '
+                        'override base with env HMUITEST_HISTORY_DIR)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_tree_auto)
 
@@ -935,7 +1076,9 @@ def build_parser():
     p = script_sub.add_parser('run', help='Run test script file')
     p.add_argument('file', help='Script JSON file path')
     p.add_argument('--history-dir', default=None,
-                   help='History directory (default: system temp)')
+                   help='Base dir for history baseline; actual files go to a per-device '
+                        'subdir (default $TMPDIR/hmuitest-history/<device>; '
+                        'override base with env HMUITEST_HISTORY_DIR)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_script_run)
 
@@ -945,6 +1088,22 @@ def build_parser():
     p.add_argument('--output', '-o', default=None,
                    help='Output script file (default: recorded_script.json)')
     p.set_defaults(func=cmd_script_record)
+
+    # ---------- device ----------
+    device = sub.add_parser('device', help='Device claims across sessions (parallel agents)')
+    device_sub = device.add_subparsers(dest='subcommand', metavar='<action>', required=True)
+
+    p = device_sub.add_parser('status', help='List device claims (which session holds which device)')
+    p.set_defaults(func=cmd_device_status)
+
+    p = device_sub.add_parser('release', help='Release device claims')
+    p.add_argument('--device', '-d', default=None, help='Only release this device')
+    p.add_argument('--session', default=None, help='Only release claims of this session')
+    p.add_argument('--stale', action='store_true',
+                   help='Only release claims whose heartbeat has expired')
+    p.add_argument('--all', dest='release_all', action='store_true',
+                   help='Release every claim regardless of session')
+    p.set_defaults(func=cmd_device_release)
 
     return parser
 
@@ -956,7 +1115,67 @@ def main():
     except Exception:
         _LOG_FILE = None
     parser = build_parser()
-    args = parser.parse_args()
+    # 让 --json 可放在子命令前或后。tree 例外：其 --json 另有「搜索结果
+    # 数组」语义（tree show/dump 的子命令参数），保持原样。
+    argv = sys.argv[1:]
+    json_anywhere = False
+    if '--json' in argv:
+        _commands = {'aa', 'ui', 'tree', 'script', 'device'}
+        _cmd = next((a for a in argv if a in _commands), '')
+        if _cmd != 'tree':
+            argv = [a for a in argv if a != '--json']
+            json_anywhere = True
+    args = parser.parse_args(argv)
+    if json_anywhere:
+        args.json_output = True
+    # json 模式：人类输出转 stderr，JSON 独占 stdout（_JSON_STDOUT 留原句柄）
+    global _JSON_STDOUT
+    _JSON_STDOUT = sys.stdout
+    if getattr(args, 'json_output', False):
+        sys.stdout = sys.stderr
+
+    if getattr(args, 'no_artifacts', False):
+        try:
+            from engines.artifacts import disable as _disable_artifacts
+            _disable_artifacts()
+        except Exception:
+            pass
+
+    try:
+        from utils.device_lock import configure as _configure_device_lock
+        _configure_device_lock(
+            takeover=True if getattr(args, 'device_takeover', False) else None,
+            wait_s=getattr(args, 'device_wait', None),
+            enabled=False if getattr(args, 'no_device_lock', False) else None)
+    except Exception:
+        pass
+
+    # 统一解析目标设备并在会话内登记占用。引擎多靠 self.device 直接工作（未必
+    # 走 detect_device_id），因此这里解析后回注 args.device，既保证确定性指向，
+    # 又保证占用锁生效。`device` 子命令自身不参与。
+    if getattr(args, 'command', None) != 'device' and hasattr(args, 'device'):
+        try:
+            from utils.hdc import claim_device, detect_device_raw
+            json_mode = getattr(args, 'json_output', False)
+            target = args.device or detect_device_raw()
+            if target:
+                blocked = claim_device(target, quiet=json_mode)
+                if blocked is not None:
+                    if json_mode:
+                        verdict = _make_verdict(
+                            "DEVICE_IN_USE",
+                            f"device {target} held by session {blocked.owner_session}",
+                            device=target,
+                            owner_session=blocked.owner_session,
+                            owner_pid=blocked.owner_pid,
+                            suggestion="retry with --device-wait or --device-takeover")
+                        _write_json(_attach_log_path(verdict))
+                    sys.exit(1)
+                args.device = target
+        except SystemExit:
+            raise
+        except Exception:
+            pass
 
     if hasattr(args, 'func'):
         args.func(args)

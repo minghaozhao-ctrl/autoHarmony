@@ -47,6 +47,8 @@ _EXIT_RC = None
 # 原始 sys.exit / sys.excepthook（只包装一次）
 _ORIG_EXIT = None
 _ORIG_HOOK = None
+# 原始 stderr（tee 之前的终端句柄）：失败时直接向终端提示日志路径，绕过 tee 防递归
+_ORIG_STDERR = None
 
 
 class _Tee:
@@ -158,6 +160,13 @@ def _install_observers():
                     _raw_write("[exit] rc=%s" % _EXIT_RC)
                 except Exception:
                     pass
+                # 失败时把日志路径提示到终端 stderr（stdout 保持干净，供 Agent 解析）
+                try:
+                    if _EXIT_RC not in (0, None) and _ORIG_STDERR and _ACTIVE:
+                        _ORIG_STDERR.write("📝 日志文件: %s\n" % _ACTIVE[0])
+                        _ORIG_STDERR.flush()
+                except Exception:
+                    pass
                 _ORIG_EXIT(code)
 
             sys.exit = _logged_exit
@@ -207,7 +216,7 @@ def init_logger(prog="uitest", label=None):
     返回日志文件绝对路径（字符串）；若未启用文件日志则返回 None。
     重复调用安全（幂等：第二次直接返回已打开的日志路径）。
     """
-    global _LOG_DIR, _FH, _RUN_ID, _SESSION_T0
+    global _LOG_DIR, _FH, _RUN_ID, _SESSION_T0, _ORIG_STDERR
     if _ACTIVE:
         return _ACTIVE[0]
 
@@ -244,6 +253,7 @@ def init_logger(prog="uitest", label=None):
         fh.write("[page] %s\n" % _pagehint)
     fh.flush()
 
+    _ORIG_STDERR = sys.stderr
     for name in ("stdout", "stderr"):
         orig = getattr(sys, name)
         setattr(sys, name, _Tee(orig, fh))
@@ -251,6 +261,16 @@ def init_logger(prog="uitest", label=None):
     _install_observers()
     _ACTIVE.append(logfile)
     return logfile
+
+
+def current_log_path():
+    """当前运行日志文件的绝对路径；文件日志未启用时返回 None。"""
+    return _ACTIVE[0] if _ACTIVE else None
+
+
+def log_dir_path():
+    """当前日志目录（archive_dump/artifacts 的根目录）；未启用时返回 None。"""
+    return _LOG_DIR
 
 
 def archive_dump(local_json_path, tag="layout", device=None):

@@ -14,12 +14,22 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_SESSION_FILE = os.path.expanduser("~/.hm_bridge_device")
+_DEFAULT_SESSION_FILE = os.path.expanduser("~/.hm_bridge_device")
+
+
+def session_file() -> str:
+    """会话设备锁文件路径。
+
+    可用环境变量 HMUITEST_SESSION_FILE 覆盖，便于多会话并行时各自独立，
+    避免共用 ~/.hm_bridge_device 导致会话间设备选择互相污染。
+    """
+    return os.path.expanduser(
+        os.environ.get("HMUITEST_SESSION_FILE") or _DEFAULT_SESSION_FILE)
 
 
 def _session_device() -> Optional[str]:
     try:
-        with open(_SESSION_FILE) as f:
+        with open(session_file()) as f:
             val = f.read().strip()
             return val if val else None
     except (FileNotFoundError, OSError):
@@ -28,7 +38,7 @@ def _session_device() -> Optional[str]:
 
 def _save_session_device(device: str) -> None:
     try:
-        with open(_SESSION_FILE, 'w') as f:
+        with open(session_file(), 'w') as f:
             f.write(device.strip())
     except OSError:
         pass
@@ -52,9 +62,52 @@ def _list_online_devices() -> list:
         return []
 
 
-def detect_device_id(allow_env: bool = True, allow_session: bool = True) -> Optional[str]:
+def claim_device(device: str, quiet: bool = False):
+    """为目标设备登记/续约占用声明。
+
+    Returns:
+        None 表示放行；被其他活跃会话占用时返回 ClaimOutcome（含 owner 信息）。
     """
-    自动检测可用的 HDC 设备 ID
+    try:
+        try:
+            from utils.device_lock import ensure_claim
+        except ImportError:
+            from device_lock import ensure_claim  # skill 侧扁平导入
+        outcome = ensure_claim(device)
+    except Exception as e:  # 锁失败不应阻断主流程
+        logger.warning(f"设备占用锁异常（忽略，继续执行）: {e}")
+        return None
+    if outcome.ok:
+        if outcome.code == "STALE_STOLEN":
+            logger.warning(
+                f"设备 {device} 原会话 {outcome.owner_session} 声明已过期，已接替")
+        return None
+    if not quiet:
+        print(f"❌ 设备 {device} 已被会话 {outcome.owner_session} 占用"
+              f"（pid={outcome.owner_pid}）")
+        print("   等待/抢占：--device-wait <秒> / --device-takeover；"
+              "查看：autoharmony device status")
+        print(f"ACTION_VERDICT: DEVICE_IN_USE | "
+              f"reason=held by session {outcome.owner_session} | "
+              f"suggestion=retry with --device-wait or --device-takeover")
+    return outcome
+
+
+def detect_device_id(allow_env: bool = True, allow_session: bool = True) -> Optional[str]:
+    """自动检测设备并在会话内登记占用；冲突时返回 None。
+
+    设备解析见 :func:`detect_device_raw`；解析成功后调用 device_lock 登记 claim，
+    使同机并行的其他会话不会抢用同一台设备（可用 HMUITEST_DEVICE_LOCK=off 关闭）。
+    """
+    device = detect_device_raw(allow_env=allow_env, allow_session=allow_session)
+    if device and claim_device(device) is not None:
+        return None
+    return device
+
+
+def detect_device_raw(allow_env: bool = True, allow_session: bool = True) -> Optional[str]:
+    """
+    自动检测可用的 HDC 设备 ID（不含占用锁）
 
     优先级：
      1. HARMONY_DEVICE_ID 环境变量（设置即锁定到 session 文件）
@@ -92,7 +145,7 @@ def detect_device_id(allow_env: bool = True, allow_session: bool = True) -> Opti
                 return cached
             logger.warning(f"session 锁定设备 {cached} 已离线，清除 session 并重新检测")
             try:
-                os.remove(_SESSION_FILE)
+                os.remove(session_file())
             except OSError:
                 pass
 

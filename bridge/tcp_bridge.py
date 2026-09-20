@@ -10,8 +10,10 @@ Usage:
     bridge.close()
 """
 
+import importlib
 import json
 import logging
+import os
 import socket as sock
 import subprocess
 import time
@@ -118,7 +120,9 @@ class TcpBridge:
             except (ConnectionError, BrokenPipeError) as e:
                 last_err = e
                 logger.warning(f"{method} connection error (attempt {attempt + 1}): {e}")
-        raise last_err
+        if last_err is not None:
+            raise last_err
+        raise ConnectionError(f"{method}: no response after retries")
 
     def _send_once(self, raw_request: str, method: str) -> Dict[str, Any]:
         s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
@@ -148,3 +152,35 @@ class TcpBridge:
                 s.close()
             except Exception:
                 pass
+
+
+def resolve_bridge_class():
+    """解析用户自定义桥接类（默认 `TcpBridge`）。
+
+    BatchRunner 的桥接步骤要调用项目专属的语义方法（navigate/login/...），
+    这些方法由使用方自行扩展，不由本框架提供。用环境变量指向你的子类：
+
+        HMUITEST_BRIDGE_CLASS=myproject.bridge:DigitalHomeBridge
+
+    支持 "module:Class" 或 "module.Class" 两种写法。加载失败则回退
+    `TcpBridge`（此时缺失的方法会让对应步骤以
+    `ACTION_VERDICT: ERROR | reason=bridge_action_unsupported` 干净失败）。
+    模板见 `bridge/bridge_template.py` 与 `docs/BRIDGE.md`。
+    """
+    spec = os.environ.get("HMUITEST_BRIDGE_CLASS", "").strip()
+    if not spec:
+        return TcpBridge
+    try:
+        if ":" in spec:
+            mod_name, cls_name = spec.split(":", 1)
+        else:
+            mod_name, _, cls_name = spec.rpartition(".")
+        module = importlib.import_module(mod_name)
+        cls = getattr(module, cls_name)
+        if not (isinstance(cls, type) and issubclass(cls, TcpBridge)):
+            raise TypeError("%s is not a TcpBridge subclass" % spec)
+        return cls
+    except Exception as e:
+        logger.warning("HMUITEST_BRIDGE_CLASS=%s load failed, fallback to TcpBridge: %s",
+                       spec, e)
+        return TcpBridge

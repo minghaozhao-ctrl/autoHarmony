@@ -7,6 +7,7 @@
 import json
 import os
 import re
+import tempfile
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from enum import Enum
@@ -524,6 +525,20 @@ class WidgetTreeDiff:
         'bottomsheet', 'sidebarm', 'toastdialog'
     }
 
+    # 系统 UI 窗口 bundle（状态栏/桌面/系统设置等）。这些窗口与 App 内容无关，
+    # 且状态栏时钟/电量等每秒都变，若不排除会在 diff 中产生“伪变化”。
+    # 单一事实来源：verdict.SYSTEM_UI_BUNDLES 引用本表。
+    SYSTEM_UI_BUNDLES = {
+        'com.ohos.sceneboard',        # HarmonyOS 桌面 + 状态栏（SCBDesktop）
+        'com.ohos.systemui',          # 系统状态栏/通知
+        'com.ohos.settings',
+        'com.ohos.note',
+        'com.huawei.hmos.sceneboard',
+        'com.huawei.hmos.systemui',
+        'com.huawei.hmos.launcher',
+        'com.huawei.hmos.settings',
+    }
+
     # 纯布局/整页框架容器：本身绝不是弹窗/覆盖层，只有内含确认/取消类按钮时
     # 才视为系统弹窗容器。用于避免整屏容器被误判为覆盖层，如页面根、软键盘
     # 窗口 root、sceneboard 容器；以及 rcp 等自绘页面抛出的 Folder/Hover/
@@ -794,6 +809,17 @@ class WidgetTreeDiff:
         return changes
 
     @staticmethod
+    def is_system_ui_widget(widget: Dict) -> bool:
+        """是否为系统 UI（状态栏/桌面等）控件。
+
+        bundle 取自 widget 自身或最近祖先（解析时已继承）；系统 UI 时钟/电量
+        等动态内容会造成 diff 伪变化，需在比较前排除。
+        """
+        bundle = (widget.get('bundleName')
+                  or (widget.get('attributes') or {}).get('bundleName') or '').strip()
+        return bundle in WidgetTreeDiff.SYSTEM_UI_BUNDLES
+
+    @staticmethod
     def is_significant_widget(widget: Dict) -> bool:
         widget_type = widget.get('type', '').lower()
         if widget_type in WidgetTreeDiff.PERSONALIZED_TYPES:
@@ -909,8 +935,13 @@ class WidgetTreeDiff:
         # 覆盖层检测必须使用原始（未过滤）小部件列表，因为 parent_index 指向原始索引
         before_overlays = self.detect_overlays(before_widgets, after_analyzer.get_screen_bounds() if after_analyzer else None)
         after_overlays = self.detect_overlays(after_widgets, after_analyzer.get_screen_bounds() if after_analyzer else None)
-        before_widgets = [w for w in before_widgets if self.is_significant_widget(w)]
-        after_widgets = [w for w in after_widgets if self.is_significant_widget(w)]
+        # 过滤：非显著控件 + 系统 UI（状态栏时钟/电量等会每秒变化，制造伪 diff）
+        before_widgets = [w for w in before_widgets
+                          if self.is_significant_widget(w)
+                          and not self.is_system_ui_widget(w)]
+        after_widgets = [w for w in after_widgets
+                         if self.is_significant_widget(w)
+                         and not self.is_system_ui_widget(w)]
 
         if before_route and after_route:
             if before_route != after_route:
@@ -1103,12 +1134,76 @@ class WidgetTreeDiff:
 
 # ==================== 自动差异管理器 ====================
 
-class AutoDiffManager:
-    """自动差异管理器"""
+def _safe_dirname(name: str) -> str:
+    """把设备序列号转成文件系统安全的目录名（127.0.0.1:5555 → 127.0.0.1_5555）"""
+    return re.sub(r'[^0-9A-Za-z._-]', '_', name or '') or 'default'
 
-    def __init__(self, history_dir: Optional[str] = None):
-        import tempfile
-        self.history_dir = history_dir or tempfile.gettempdir()
+
+_OPENCODE_SESSION_RE = re.compile(r'[/\\]session-([0-9a-fA-F][0-9a-fA-F-]{6,})')
+_SESSION_OFF = {'0', 'off', 'false', 'no', 'none', '-'}
+
+
+def _opencode_session_id() -> Optional[str]:
+    """从 opencode/agent 的对话工作目录推断会话标识。
+
+    opencode 不为每个对话注入会话 id 环境变量（OPENCODE_PID 是所有对话共享的
+    server 进程），且 export 不跨 bash 调用保持；唯一“稳定且每对话唯一”的是对话
+    工作目录 `.../chats/<date>/session-<id>`。命令若先 `cd`，该目录会出现在
+    OLDPWD（每次 bash 调用都从对话目录启动），故 PWD/OLDPWD/当前目录都扫一遍。
+    """
+    if not (os.environ.get('OPENCODE') or os.environ.get('AGENT')):
+        return None
+    cands = [os.environ.get('PWD'), os.environ.get('OLDPWD'), os.getcwd()]
+    cands.extend(os.environ.values())  # 兜底：环境里任何含对话目录的值
+    for cand in cands:
+        m = _OPENCODE_SESSION_RE.search(cand or '')
+        if m:
+            return m.group(1)[:12]
+    return None
+
+
+def _resolve_session_id() -> Optional[str]:
+    """会话标识：显式 HMUITEST_SESSION_ID 优先，其次自动推断 opencode 对话。
+
+    HMUITEST_SESSION_ID 取 0/off/false/no/none/- 或空串表示关闭（不按会话隔离）。
+    """
+    raw = os.environ.get('HMUITEST_SESSION_ID')
+    if raw is not None:
+        raw = raw.strip()
+        if not raw or raw.lower() in _SESSION_OFF:
+            return None
+        return raw
+    return _opencode_session_id()
+
+
+def resolve_history_dir(history_dir: Optional[str] = None,
+                        device: Optional[str] = None,
+                        session: Optional[str] = None) -> str:
+    """解析差异基准目录：<基础目录>/hmuitest-history/<设备>[/<会话>]/
+
+    基础目录优先级：history_dir 参数 > 环境变量 HMUITEST_HISTORY_DIR > 系统临时目录。
+    **按设备分子目录**：每次 CLI 调用是独立进程，差异比较的“操作前”基准需落盘复用；
+    多台设备/多个会话并发时若不隔离，会互相覆盖同一份基线导致 diff 错乱。
+    再可选**按会话**加一层（session 参数 > HMUITEST_SESSION_ID > opencode 对话自动推断，
+    见 _resolve_session_id）：同一设备并行跑多个会话时用它岔开目录；**该 id 必须跨命令稳定**
+    （不能用每进程随机值，否则每次命令都新建目录、丢失基线）。
+    """
+    base = (history_dir
+            or os.environ.get('HMUITEST_HISTORY_DIR')
+            or tempfile.gettempdir())
+    parts = ['hmuitest-history', _safe_dirname(device or 'default')]
+    sid = session or _resolve_session_id()
+    if sid:
+        parts.append(_safe_dirname(sid))
+    return os.path.join(base, *parts)
+
+
+class AutoDiffManager:
+    """自动差异管理器（基准目录按设备隔离，见 resolve_history_dir）"""
+
+    def __init__(self, history_dir: Optional[str] = None,
+                 device: Optional[str] = None):
+        self.history_dir = resolve_history_dir(history_dir, device)
         os.makedirs(self.history_dir, exist_ok=True)
         self.history_file = os.path.join(self.history_dir, "widget_tree_history.json")
         self.route_history_file = os.path.join(self.history_dir, "widget_tree_route_history.json")

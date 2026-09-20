@@ -16,7 +16,7 @@ metadata:
 # autoharmony
 
 统一 CLI 入口 `autoharmony.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
-所有命令退出码 0/1（0=通过），追加 `--json` 输出结构化 verdict 供 agent 解析。
+所有命令退出码 0/1/2（0=通过，1=失败，2=用法错误），追加 `--json` 输出结构化 verdict 供 agent 解析。
 
 > 交互流程：每次 `ui` 操作后先读 `ACTION_VERDICT` 与差异报告再执行下一步，
 > 禁止不看反馈连续盲操作。同一操作失败 3 次即停止报告，不试第 4 次。
@@ -37,6 +37,8 @@ python3 $UITEST ui click-by-text "设置" --json
 ```
 
 设备检测：自动走 env `HARMONY_DEVICE_ID` → session → `hdc list targets`，可 `--device <ID>` 指定。
+多会话共享同一台设备时自动加占用锁：`device status` 查看、`device release [--stale|--all]` 释放；
+冲突可 `--device-wait <秒>` 等待或 `--device-takeover` 抢占，`--no-device-lock` / env `HMUITEST_DEVICE_LOCK=off` 关闭。
 
 ## 核心工作流
 

@@ -261,13 +261,16 @@ class WidgetTreeAnalyzer:
             return f"({cx}, {cy})"
         return ""
     
-    def _parse_tree(self, node: Dict, depth: int, parent_index: Optional[int] = None):
+    def _parse_tree(self, node: Dict, depth: int, parent_index: Optional[int] = None,
+                    parent_bundle: str = ''):
         """递归解析控件树（保留父子关系和渲染顺序用于遮挡分析）
 
         Args:
             node: 当前节点
             depth: 当前深度
             parent_index: 父节点在 self.widgets 中的索引（根节点为 None）
+            parent_bundle: 最近祖先的 bundleName（用于向子节点继承归属窗口；
+                状态栏/桌面等系统窗口的子节点自身多不携带 bundleName）
         """
         if not isinstance(node, dict):
             return
@@ -276,6 +279,8 @@ class WidgetTreeAnalyzer:
         self.max_depth = max(self.max_depth, depth)
 
         attrs = node.get('attributes', {})
+        # 归属 bundle：自身缺失时继承最近祖先，用于识别系统 UI（状态栏/桌面）
+        bundle = (attrs.get('bundleName') or parent_bundle or '')
         widget_type = attrs.get('type', 'unknown')
         self.type_stats[widget_type] += 1
 
@@ -297,6 +302,7 @@ class WidgetTreeAnalyzer:
             'checked': attrs.get('checked', ''),
             'accessibilityId': attrs.get('accessibilityId', ''),
             'description': attrs.get('description', ''),
+            'bundleName': bundle,
             'attributes': attrs,
             # 树结构信息：用于遮挡关系和弹窗内容归属分析
             'parent_index': parent_index,
@@ -307,7 +313,8 @@ class WidgetTreeAnalyzer:
 
         children = node.get('children', [])
         for child in children:
-            self._parse_tree(child, depth + 1, parent_index=current_index)
+            self._parse_tree(child, depth + 1, parent_index=current_index,
+                             parent_bundle=bundle)
 
     def _is_descendant(self, widget_idx: int, ancestor_idx: int) -> bool:
         """判断 widget_idx 是否为 ancestor_idx 的后代节点"""

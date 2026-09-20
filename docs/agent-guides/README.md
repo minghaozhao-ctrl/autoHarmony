@@ -30,4 +30,8 @@ record    → autoharmony script record start ... stop --output flow.json
 verify    → autoharmony script run flow.json --json
 ```
 
-Every command returns `exit 0/1` and `--json` verdict → agents parse, never regex.
+Every command returns `exit 0/1/2` (0 pass, 1 fail, 2 usage error) and `--json` verdict → agents parse, never regex.
+
+On failure, the log file path is printed to **stderr** (`📝 日志文件: ...`), and a
+failure bundle (screenshot + hilog slice + dump) is written under
+`<log dir>/artifacts/` — disable with `--no-artifacts`.
