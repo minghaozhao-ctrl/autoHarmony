@@ -69,10 +69,7 @@ def claim_device(device: str, quiet: bool = False):
         None 表示放行；被其他活跃会话占用时返回 ClaimOutcome（含 owner 信息）。
     """
     try:
-        try:
-            from utils.device_lock import ensure_claim
-        except ImportError:
-            from device_lock import ensure_claim  # skill 侧扁平导入
+        from utils.device_lock import ensure_claim
         outcome = ensure_claim(device)
     except Exception as e:  # 锁失败不应阻断主流程
         logger.warning(f"设备占用锁异常（忽略，继续执行）: {e}")

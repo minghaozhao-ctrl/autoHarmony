@@ -18,6 +18,7 @@ import socket as sock
 import subprocess
 import time
 import uuid
+import zlib
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,17 @@ DEVICE_BRIDGE_PORT = 9999
 FPORT_BASE = 19999
 
 
+class JSONRPCError(RuntimeError):
+    """App 端返回 JSON-RPC error（路由未注册/协议层拒绝）——
+    main() 对此做结构化出口（区别于代码 bug 的 RuntimeError，后者 re-raise）"""
+    pass
+
+
 def _device_fport(device: Optional[str]) -> int:
+    # crc32 稳定哈希：Python hash() 跨进程随机（PYTHONHASHSEED），会导致
+    # 每进程端口不同——fport 规则累积/无法互清。crc32 保证每设备固定端口
     if device:
-        return FPORT_BASE + (hash(device) & 0x7FFFFFFF) % 1000
+        return FPORT_BASE + zlib.crc32(device.encode('utf-8')) % 1000
     return FPORT_BASE
 
 
@@ -122,7 +131,7 @@ class TcpBridge:
                 logger.warning(f"{method} connection error (attempt {attempt + 1}): {e}")
         if last_err is not None:
             raise last_err
-        raise ConnectionError(f"{method}: no response after retries")
+        raise ConnectionError(f"{method}: 连接失败")
 
     def _send_once(self, raw_request: str, method: str) -> Dict[str, Any]:
         s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
@@ -144,7 +153,7 @@ class TcpBridge:
             if "result" in response:
                 return response["result"]
             error = response.get("error", {})
-            raise RuntimeError(error.get("message", "unknown error"))
+            raise JSONRPCError(error.get("message", "unknown error"))
         except sock.timeout:
             raise TimeoutError(f"request timeout ({self.timeout}s): {method}")
         finally:

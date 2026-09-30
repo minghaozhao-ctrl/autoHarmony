@@ -3,7 +3,7 @@
 """
 控件树分析器（类库，CLI 入口见 autoharmony.py）
 
-用于解析HarmonyOS UITest框架生成的控件树JSON文件，提供概览和搜索功能。
+用于解析HarmonyOS UITest框架生成的控件树JSON文件，提供搜索功能。
 支持本地文件模式和远程原子操作模式（直接从设备获取并分析）。
 """
 
@@ -15,6 +15,86 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from engines.diff_engine import WidgetTreeDiff
 from utils.common import run_hdc_command
+from utils.bundle import default_bundle
+
+
+def filter_to_top_page(data: Dict, bundle: Optional[str] = None) -> Dict:
+    """过滤 dumpLayout JSON：剔除 Navigation 栈内被覆盖的下层页面。
+
+    场景：事件页（AFMsgPushSetPage）用 NavDestinationMode.DIALOG 覆盖式 push，
+    下层设置页仍留在控件树中（visible=true），导致 dump 混层、判断页面归属出错。
+
+    规则：
+    - 目标页面 = App 窗口内 DFS 遍历的最后一个 NavDestination（Navigation 栈顶）
+    - 保留：目标 NavDestination 及其祖先 NavDestination 的子树 + 不在任何 NavDestination
+      内的节点（弹窗/覆盖层）
+    - 剔除：被覆盖的下层 NavDestination（target 的兄弟分支）、其他窗口（桌面/状态栏等）
+    - 安全降级：找不到 App 窗口或 NavDestination 时原样返回（不过滤）
+
+    Args:
+        data: dumpLayout 解析出的 JSON 树（dict）
+        bundle: 目标应用包名（默认取 HMUITEST_BUNDLE，否则内置回退）
+
+    Returns:
+        过滤后的 JSON 树（dict）
+    """
+    if not isinstance(data, dict):
+        return data
+    bundle = bundle or default_bundle()
+    app_win = None
+    for child in data.get('children', []):
+        if child.get('attributes', {}).get('bundleName') == bundle:
+            app_win = child
+            break
+    if app_win is None:
+        return data
+
+    navs: List[Tuple[Dict, List[Dict]]] = []
+
+    def collect_nav(n, anc: List[Dict]):
+        if n.get('attributes', {}).get('type') == 'NavDestination':
+            navs.append((n, anc))
+            anc = anc + [n]
+        for c in n.get('children', []):
+            collect_nav(c, anc)
+
+    collect_nav(app_win, [])
+    if not navs:
+        return data
+    target, target_anc = navs[-1]
+    keep_ids = {id(target)} | {id(a) for a in target_anc}
+
+    owner: Dict[int, Optional[Dict]] = {}
+
+    def mark(n, cur):
+        if n.get('attributes', {}).get('type') == 'NavDestination':
+            cur = n
+        owner[id(n)] = cur
+        for c in n.get('children', []):
+            mark(c, cur)
+
+    mark(app_win, None)
+
+    def rebuild(n):
+        attrs = n.get('attributes', {})
+        if attrs.get('type') == 'NavDestination' and id(n) not in keep_ids:
+            return None
+        cur_owner = owner.get(id(n))
+        keep = cur_owner is target or cur_owner is None
+        children = []
+        for c in n.get('children', []):
+            r = rebuild(c)
+            if r is not None:
+                children.append(r)
+        if not keep and not children:
+            return None
+        return {'attributes': attrs, 'children': children}
+
+    new_app = rebuild(app_win)
+    new_root = {'attributes': data.get('attributes', {}), 'children': []}
+    if new_app is not None:
+        new_root['children'].append(new_app)
+    return new_root
 
 
 class WidgetTreeAnalyzer:
@@ -24,21 +104,6 @@ class WidgetTreeAnalyzer:
     REMOTE_PATH = "/data/local/tmp/layout.json"
     TEMP_FILE_PREFIX = "widget_tree_"
 
-    # 弹窗/覆盖层控件类型
-    OVERLAY_TYPES = {
-        'dialog', 'alertdialog', 'customdialog', 'sheet', 'bindsheet',
-        'popup', 'menu', 'actionsheet', 'toast', 'panel',
-    }
-
-    # 纯布局容器类型（不画框线）
-    CONTAINER_TYPES = {
-        'row', 'column', 'stack', 'flex', 'relativecontainer',
-        'navigation', 'navigationcontent', 'navdestination', 'navdestinationcontent',
-        'navbar', 'navbarcontent', 'tabs', 'tabcontent', 'tabbar',
-        'swiper', 'scroll', 'refresh',
-        'blank', 'line', '__common__', 'windowscene', 'root', 'metaballnode',
-    }
-    
     def __init__(self, json_file: str, device: Optional[str] = None):
         """初始化分析器
         
@@ -125,17 +190,14 @@ class WidgetTreeAnalyzer:
                 pass
             self._temp_file = None
     
-    def _dispatch_analysis(self, mode: str = "overview",
+    def _dispatch_analysis(self, mode: Optional[str] = None,
                            search_param: Optional[str] = None,
-                           rw: int = 120, rh: int = 110,
                            as_json: bool = False):
         """根据模式执行分析（共享调度逻辑）
 
         Args:
-            mode: 分析模式 (overview/type/text/id/clickable/input/list-types/detail)
+            mode: 分析模式 (type/text/id/clickable/input/list-types/detail)，None 时提示
             search_param: 搜索参数（type/text/id/detail 模式时需要）
-            rw: overview 网格宽度
-            rh: overview 网格高度
             as_json: 搜索类模式以 JSON 数组输出
         """
         if as_json:
@@ -143,9 +205,7 @@ class WidgetTreeAnalyzer:
             if filter_fn is not None:
                 self.search_json(filter_fn)
                 return
-        if mode == "overview":
-            self.overview(rw, rh)
-        elif mode == "type" and search_param:
+        if mode == "type" and search_param:
             self.search_by_type(search_param)
         elif mode == "text" and search_param:
             self.search_by_text(search_param)
@@ -163,9 +223,9 @@ class WidgetTreeAnalyzer:
             except ValueError:
                 print(f"❌ detail 参数需要整数索引: {search_param}")
         else:
-            self.overview(rw, rh)
+            print("未指定分析模式（--type/--text/--id/--clickable/--input/--list-types/--detail）")
 
-    def _get_filter(self, mode: str, search_param: Optional[str]):
+    def _get_filter(self, mode: Optional[str], search_param: Optional[str]):
         """返回搜索模式对应的过滤函数（非搜索模式返回 None）"""
         if mode == "type" and search_param:
             return lambda w: w['type'].lower() == search_param.lower()
@@ -186,7 +246,8 @@ class WidgetTreeAnalyzer:
         found = [w for w in self.widgets if filter_fn(w)]
         out = []
         for w in found:
-            m = re.match(r'\((\d+),\s*(\d+)\)', w.get('center') or '')
+            # 负坐标支持（与 _parse_center 同口径，勿再分叉）
+            m = re.match(r'\((-?\d+),\s*(-?\d+)\)', w.get('center') or '')
             out.append({
                 'type': w['type'],
                 'id': w['id'],
@@ -199,42 +260,26 @@ class WidgetTreeAnalyzer:
             })
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
-    def dump_and_analyze(self, mode: str = "overview", search_param: Optional[str] = None,
-                         rw: int = 120, rh: int = 110,
-                         as_json: bool = False) -> bool:
-        """原子操作：从设备获取控件树并立即分析
+    def load_tree(self, filter_top: bool = True) -> bool:
+        """加载控件树JSON文件
 
         Args:
-            mode: 分析模式 (overview/type/text/id/clickable/input/list-types)
-            search_param: 搜索参数（type/text/id 模式时需要）
-            as_json: 搜索类模式以 JSON 数组输出
+            filter_top: 是否只保留当前可见页面（剔除被 DIALOG 覆盖的下层页面与系统窗口）。
+                默认 True；传 False 可拿到完整原始树（含栈内下层页面）。
 
-        Returns:
-            执行成功返回 True
-        """
-        success, msg = self.dump_layout()
-        if not success:
-            print(f"❌ 获取控件树失败: {msg}")
-            return False
-
-        if not self.load_tree():
-            self.cleanup()
-            return False
-
-        self._dispatch_analysis(mode, search_param, rw, rh, as_json=as_json)
-
-        self.cleanup()
-        return True
-        
-    def load_tree(self) -> bool:
-        """加载控件树JSON文件
-        
         Returns:
             bool: 加载成功返回True，否则返回False
         """
         try:
             with open(self.json_file, 'r', encoding='utf-8') as f:
                 self.tree_data = json.load(f)
+            if filter_top:
+                self.tree_data = filter_to_top_page(self.tree_data)
+            # 重置解析状态（支持重复 load_tree，如 --no-filter 重载原树）
+            self.widgets = []
+            self.widget_count = 0
+            self.max_depth = 0
+            self.type_stats = defaultdict(int)
             self._parse_tree(self.tree_data, 0)
             return True
         except Exception as e:
@@ -253,7 +298,8 @@ class WidgetTreeAnalyzer:
         """
         if not bounds_str:
             return ""
-        match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        # 负坐标支持（与 WidgetTreeDiff._parse_bounds 同口径，勿再分叉）
+        match = re.match(r'\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]', bounds_str)
         if match:
             left, top, right, bottom = (int(x) for x in match.groups())
             cx = (left + right) // 2
@@ -316,276 +362,14 @@ class WidgetTreeAnalyzer:
             self._parse_tree(child, depth + 1, parent_index=current_index,
                              parent_bundle=bundle)
 
-    def _is_descendant(self, widget_idx: int, ancestor_idx: int) -> bool:
-        """判断 widget_idx 是否为 ancestor_idx 的后代节点"""
-        if widget_idx < 0 or widget_idx >= len(self.widgets):
-            return False
-        if ancestor_idx < 0 or ancestor_idx >= len(self.widgets):
-            return False
-        cur = self.widgets[widget_idx].get('parent_index')
-        while cur is not None:
-            if cur == ancestor_idx:
-                return True
-            cur = self.widgets[cur].get('parent_index') if 0 <= cur < len(self.widgets) else None
-        return False
-
     def get_screen_bounds(self) -> Optional[Tuple[int, int, int, int]]:
         """获取屏幕边界（取根节点 bounds；失败时回退到常见 1080x2400）"""
         if self.widgets:
             root_bounds = WidgetTreeDiff._parse_bounds(self.widgets[0].get('bounds', ''))
             if root_bounds:
                 return root_bounds
-        # 回退默认值（多数 HarmonyOS 设备）
-        return (0, 0, 1080, 2400)
-    
-    def overview(self, rw: Optional[int] = None, rh: int = 110):
-        """显示控件树概览 - 屏幕布局模拟图
-
-        用字符网格还原屏幕布局，框线 ┌─┐│└┘ 表示控件边界，
-        符号标注控件类型：◉按钮 ◆SymbolGlyph ▦图片 ░图片填充区。
-        检测到弹窗/覆盖层时，分别渲染"弹窗内容"与"底层内容"。
-
-        Args:
-            rw: 网格宽度（字符数，None 时自动铺满终端宽度，下限 120）
-            rh: 网格高度（字符行数，默认110）
-        """
-        if rw is None:
-            try:
-                import shutil
-                rw = max(120, shutil.get_terminal_size((120, 24)).columns - 2)
-            except Exception:
-                rw = 120
-        parsed = []
-        for w in self.widgets:
-            b = WidgetTreeDiff._parse_bounds(w.get('bounds', ''))
-            if b:
-                parsed.append((w, b))
-
-        if not parsed:
-            print("无控件可显示")
-            return
-
-        screen_w = max(b[2] for _, b in parsed)
-        screen_h = max(b[3] for _, b in parsed)
-
-        # 按实际屏幕宽高比调整网格尺寸：用统一每格像素数保持高度适配
-        pixels_per_w = screen_w / max(rw, 1)
-        pixels_per_h = screen_h / max(rh, 1)
-        pixels_per_unit = max(pixels_per_w, pixels_per_h)  # 取更受限的维度
-        effective_rh = max(int(screen_h / pixels_per_unit), 10)
-        # 宽度直接铺满 rw（竖屏等比宽度会被压到 51 列，太窄），高度保持适配不超出 rh
-        effective_rw = rw
-
-        overlays, base = self._split_overlays(parsed)
-
-        if overlays:
-            screen_area = max(screen_w * screen_h, 1)
-            fullscreen_overlay = any(
-                w['type'].lower() in self.OVERLAY_TYPES
-                and ((b[2] - b[0]) * (b[3] - b[1])) / screen_area > 0.8
-                for w, b in overlays)
-            print("═" * effective_rw)
-            print("【弹窗内容】")
-            print("═" * effective_rw)
-            self._render_grid(overlays, effective_rw, effective_rh, screen_w, screen_h)
-            print()
-            print("═" * effective_rw)
-            print("【底层内容】")
-            print("═" * effective_rw)
-            base_renderable = [item for item in base
-                               if self._is_renderable(item, screen_w, screen_h,
-                                                      effective_rw, effective_rh)]
-            if base_renderable:
-                if fullscreen_overlay:
-                    print("（弹窗为全屏/近全屏，底层内容可能大部分被遮挡）")
-                self._render_grid(base, effective_rw, effective_rh, screen_w, screen_h)
-            else:
-                print("（未检测到底层内容，可能被全屏弹窗完全遮挡）")
-        else:
-            self._render_grid(parsed, effective_rw, effective_rh, screen_w, screen_h)
-
-    def _is_renderable(self, item, screen_w: int, screen_h: int,
-                       rw: int = 120, rh: int = 110) -> bool:
-        """判断控件是否会在网格图中实际渲染（与 _render_grid 筛选一致）"""
-        w, b = item
-        x1 = int(b[0] / screen_w * rw)
-        y1 = int(b[1] / screen_h * rh)
-        x2 = int(b[2] / screen_w * rw)
-        y2 = int(b[3] / screen_h * rh)
-        if x2 - x1 < 2 or y2 - y1 < 1:
-            return False
-        if (b[2] - b[0]) >= screen_w * 0.98 and (b[3] - b[1]) >= screen_h * 0.98:
-            return False
-        wtype = w['type'].lower()
-        if wtype in self.CONTAINER_TYPES and not (w.get('text') or '').strip():
-            return False
-        return True
-
-    def _split_overlays(self, widgets_with_bounds):
-        """分离弹窗/覆盖层与底层内容（按弹窗自身子树划分，避免全屏 Dialog 误判）"""
-        overlay_ids = set()
-        for w in self.widgets:
-            if w['type'].lower() in self.OVERLAY_TYPES:
-                overlay_ids.add(id(w))
-                continue
-            cur = w.get('parent_index')
-            while cur is not None:
-                if cur < 0 or cur >= len(self.widgets):
-                    break
-                if self.widgets[cur]['type'].lower() in self.OVERLAY_TYPES:
-                    overlay_ids.add(id(w))
-                    break
-                cur = self.widgets[cur].get('parent_index')
-
-        overlays = [item for item in widgets_with_bounds if id(item[0]) in overlay_ids]
-        base = [item for item in widgets_with_bounds if id(item[0]) not in overlay_ids]
-        return overlays, base
-
-    def _render_grid(self, widgets_with_bounds, rw, rh, screen_w, screen_h):
-        """渲染字符网格布局图"""
-        grid = [[' '] * rw for _ in range(rh)]
-
-        candidates = []
-        seen_bounds = set()
-        for w, b in widgets_with_bounds:
-            x1 = int(b[0] / screen_w * rw)
-            y1 = int(b[1] / screen_h * rh)
-            x2 = int(b[2] / screen_w * rw)
-            y2 = int(b[3] / screen_h * rh)
-
-            if x2 - x1 < 2 or y2 - y1 < 1:
-                continue
-            if (b[2] - b[0]) >= screen_w * 0.98 and (b[3] - b[1]) >= screen_h * 0.98:
-                continue
-            # 跳过纯布局容器（无内容时不画框线）
-            wtype = w['type'].lower()
-            if wtype in self.CONTAINER_TYPES and not (w.get('text') or '').strip():
-                continue
-            # 去重需放在各跳过条件之后：否则无文本容器会占用槽位，
-            # 导致与其同界的子 Text 节点被误丢弃（设置项文字丢失的根因）
-            if b in seen_bounds:
-                continue
-            seen_bounds.add(b)
-
-            candidates.append((w, b, x1, y1, x2, y2))
-
-        candidates.sort(key=lambda c: c[0]['depth'])
-
-        for w, b, x1, y1, x2, y2 in candidates:
-            self._draw_widget(grid, w, x1, y1, x2, y2, rw, rh)
-
-        # 屏幕外边框（最后画，强制覆盖保证边框完整连续）
-        for x in range(rw):
-            grid[0][x] = '─'
-            grid[rh - 1][x] = '─'
-        for y in range(rh):
-            grid[y][0] = '│'
-            grid[y][rw - 1] = '│'
-        grid[0][0] = '┌'
-        grid[0][rw - 1] = '┐'
-        grid[rh - 1][0] = '└'
-        grid[rh - 1][rw - 1] = '┘'
-
-        for row in grid:
-            print(''.join(row))
-
-    def _draw_widget(self, grid, w, x1, y1, x2, y2, rw, rh):
-        """在网格上绘制单个控件"""
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(rw - 1, x2)
-        y2 = min(rh - 1, y2)
-
-        if x1 >= x2 or y1 >= y2:
-            return
-
-        wtype = w['type'].lower()
-        text = (w.get('text') or '').strip()
-
-        # 小图标（图片/SymbolGlyph 面积 <12）：只放符号不画框，避免 tab 图标框线交叉
-        if not text and wtype in ('image', 'imagecomponent', 'pic', 'symbolglyph') \
-                and (x2 - x1) * (y2 - y1) < 12:
-            symbol = '◆' if wtype == 'symbolglyph' else '▦'
-            self._place_symbol(grid, symbol, x1, y1, x2, y2)
-            return
-
-        if y2 - y1 >= 2 and x2 - x1 >= 2:
-            grid[y1][x1] = '┌'
-            grid[y1][x2] = '┐'
-            grid[y2][x1] = '└'
-            grid[y2][x2] = '┘'
-            for x in range(x1 + 1, x2):
-                grid[y1][x] = '─'
-                grid[y2][x] = '─'
-            for y in range(y1 + 1, y2):
-                grid[y][x1] = '│'
-                grid[y][x2] = '│'
-        elif text and y2 - y1 == 1 and x2 - x1 >= 2:
-            # 单行文字控件：画左右端点（扁平胶囊形态，如底部tab）
-            grid[y1][x1] = '┌'
-            grid[y1][x2] = '┐'
-        elif y2 - y1 >= 2 and x2 - x1 == 1:
-            # 单列控件：画上下端点，竖线形态
-            grid[y1][x1] = '┌'
-            grid[y2][x1] = '└'
-
-        if text:
-            avail = x2 - x1 - 1
-            if avail > 0:
-                display = self._fit_text(text, avail)
-                mid_y = (y1 + y2) // 2
-                for i, ch in enumerate(display):
-                    px = x1 + 1 + i
-                    if px < x2:
-                        grid[mid_y][px] = ch
-        elif wtype == 'button':
-            self._place_symbol(grid, '◉', x1, y1, x2, y2)
-        elif wtype == 'symbolglyph':
-            self._place_symbol(grid, '◆', x1, y1, x2, y2)
-        elif wtype in ('image', 'imagecomponent', 'pic'):
-            if (x2 - x1) * (y2 - y1) >= 12:
-                for y in range(y1 + 1, y2):
-                    for x in range(x1 + 1, x2):
-                        grid[y][x] = '░'
-            else:
-                self._place_symbol(grid, '▦', x1, y1, x2, y2)
-        elif wtype == 'toggle':
-            self._place_symbol(grid, '◐', x1, y1, x2, y2)
-        elif wtype in ('textinput', 'textarea'):
-            self._place_symbol(grid, '▏', x1, y1, x2, y2)
-
-    def _place_symbol(self, grid, symbol, x1, y1, x2, y2):
-        """在控件框中心放置符号"""
-        mid_x = (x1 + x2) // 2
-        mid_y = (y1 + y2) // 2
-        if y1 < mid_y < y2 and x1 < mid_x < x2:
-            grid[mid_y][mid_x] = symbol
-        elif y1 + 1 <= y2 and x1 + 1 <= x2:
-            if y1 + 1 < y2:
-                grid[y1 + 1][x1 + 1] = symbol
-
-    @staticmethod
-    def _fit_text(text: str, avail_cols: int) -> str:
-        """截断文字到可用列数（中文占2列），截断时尾部加省略号；换行符先替换为空格防止撑破网格"""
-        text = re.sub(r'[\r\n\t\u3000]+', ' ', text).strip()
-        if avail_cols < 2 or not text:
-            return ''
-        result = []
-        cols = 0
-        truncated = False
-        for ch in text:
-            w = 2 if ord(ch) > 127 else 1
-            if cols + w > avail_cols:
-                truncated = True
-                break
-            result.append(ch)
-            cols += w
-        if truncated and cols > 0:
-            while result and cols > avail_cols - 2:
-                ch = result.pop()
-                cols -= 2 if ord(ch) > 127 else 1
-            result.append('…')
-        return ''.join(result)
+        # 回退默认值（WidgetTreeDiff.DEFAULT_SCREEN_W/H，单一事实来源）
+        return (0, 0, WidgetTreeDiff.DEFAULT_SCREEN_W, WidgetTreeDiff.DEFAULT_SCREEN_H)
     
     def _search_and_print(self, filter_fn, title: str, not_found_msg: str):
         """通用搜索并打印结果

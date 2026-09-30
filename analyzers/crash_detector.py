@@ -7,6 +7,7 @@ hidumper -e（13s+）仅在确认闪退后用于获取崩溃详情。
 """
 from typing import List, Optional
 from utils.common import run_hdc_command
+from utils.bundle import default_bundle
 
 
 class CrashCheckResult:
@@ -46,9 +47,9 @@ class CrashDetector:
     ]
 
     def __init__(self, device: Optional[str] = None,
-                 bundle: str = "com.cmcc.DigitalHome"):
+                 bundle: Optional[str] = None):
         self.device = device
-        self.bundle = bundle
+        self.bundle = bundle or default_bundle()
         self._baseline_app_alive: Optional[bool] = None
         self._baseline_faultlog_count: int = 0
         self._baseline_max_acc: int = 0
@@ -61,10 +62,17 @@ class CrashDetector:
         cmd.extend(cmd_parts)
         return run_hdc_command(cmd, timeout)
 
-    def _is_app_alive(self) -> bool:
-        """检查 App 进程是否存活（~0.1s，远快于 hidumper -e 的 13s+）"""
+    def _is_app_alive(self):
+        """检查 App 进程是否存活（~0.1s，远快于 hidumper -e 的 13s+）。
+
+        Returns:
+            bool 或 None：hdc 瞬态失败返回 None（未知）——与"进程死亡"
+            (False) 区分，避免 detect 中把探测失败误判 CRASHED
+        """
         success, output = self._hdc_cmd(["shell", "pidof", self.bundle], timeout=5)
-        return success and bool(output.strip())
+        if not success:
+            return None
+        return bool(output.strip())
 
     def _init_baseline(self):
         if self._baseline_app_alive is None:
@@ -90,8 +98,15 @@ class CrashDetector:
             ["shell", "ls", "/data/log/faultlog/faultlogger/"], timeout=10
         )
         if not success:
-            return 0
-        return len([f for f in output.strip().split('\n') if f.strip()])
+            # 瞬态失败返回 -1（未知）而非 0：基线建立时 ls 瞬态失败按 0 算，
+            # 后续成功读到 N>0 条历史 faultlog 会被误判"新增"→ 假 CRASHED
+            return -1
+        # 按本 App bundle 前缀过滤：faultlogger 是全设备共享目录，
+        # 其他应用/系统进程崩溃也会产生文件，不过滤会把别的崩溃
+        # 误判成本 App CRASHED。文件名格式：com.xxx-日期-序号
+        prefix = f"{self.bundle}-"
+        return len([f for f in output.strip().split('\n')
+                    if f.strip().startswith(prefix)])
 
     def _probe(self) -> tuple:
         """一次性探测：App 进程存活 + faultlog 文件数。
@@ -117,7 +132,12 @@ class CrashDetector:
             # 命令不支持合并时保守回退
             return None, None
         alive = bool(pid_part.strip())
-        count = len([f for f in ls_part.strip().split('\n') if f.strip()])
+        # 与 _count_faultlog_files 同口径：按本 App bundle 前缀过滤——
+        # faultlogger 是全设备共享目录，不过滤会把其他应用崩溃误判本 App CRASHED
+        # （基线/检测口径不一致时，正常文件数也会被算成"新增"）
+        prefix = f"{self.bundle}-"
+        count = len([f for f in ls_part.strip().split('\n')
+                     if f.strip().startswith(prefix)])
         return alive, count
 
     @staticmethod
@@ -170,13 +190,19 @@ class CrashDetector:
             current_alive = self._is_app_alive()
             current_count = self._count_faultlog_files()
 
-        if self._baseline_app_alive and not current_alive:
+        # alive=None（hdc 瞬态失败）≠ 进程死亡（False）：未知时不判 CRASHED，
+        # 避免误报触发有副作用的 app restart（faultlog 已用 -1 同口径）
+        if self._baseline_app_alive and current_alive is False:
             result.crashed = True
             result.hidumper_records = [
                 f"App 进程 {self.bundle} 已退出（基线存活，当前不存在）"
             ]
 
-        if current_count > self._baseline_faultlog_count:
+        # 口径：-1 表示"未知"（探测/ls 瞬态失败），未知 vs 未知/已知都不判
+        # 新增——避免瞬态失败把历史 faultlog 误判成本步崩溃
+        if (current_count is not None and current_count >= 0
+                and self._baseline_faultlog_count >= 0
+                and current_count > self._baseline_faultlog_count):
             result.faultlog_files = [f"新增 {current_count - self._baseline_faultlog_count} 个文件"]
             result.crashed = True
 

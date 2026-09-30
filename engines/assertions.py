@@ -44,7 +44,7 @@ class AssertionChecker:
         if not self.route:
             return AssertionResult(
                 False, f"期望路由包含 '{expected_route}'",
-                "无法获取当前路由（hm-app-bridge-mcp 未连接？）")
+                "无法获取当前路由（TcpBridge 未连接？）")
         matched = [r for r in self.route if expected_route.lower() in r.lower()]
         if matched:
             return AssertionResult(
@@ -154,10 +154,15 @@ class AssertionChecker:
     def check_dialog(self, dialog_type: str = "Dialog") -> AssertionResult:
         """检查是否出现了指定类型的弹窗"""
         target = dialog_type.lower()
+        # 与 semantic_engine.check_dialog 同步：无 type 节点不算弹窗
+        # （旧逻辑 `'' in target` 恒真，缺 type 字段节点全部误报）、
+        # visible=false 不算；匹配只保留相等/包含（target in t），
+        # 去掉反向的 `t in target`（type='dialog' 会误命中 target='alertdialog'）
         found = [w for w in self.widgets
-                 if w.get('type', '').lower() == target
-                 or w.get('type', '').lower() in target
-                 or target in w.get('type', '').lower()]
+                 if w.get('type', '')
+                 and str(w.get('visible', 'true') or 'true').lower() != 'false'
+                 and (w.get('type', '').lower() == target
+                      or target in w.get('type', '').lower())]
         if found:
             return AssertionResult(
                 True, f"期望弹窗出现 '{dialog_type}'",

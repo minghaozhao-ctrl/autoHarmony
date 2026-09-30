@@ -35,6 +35,12 @@ class VerdictStatus(Enum):
     BACK_INEFFECTIVE = "BACK_INEFFECTIVE"
     CRASHED = "CRASHED"
     RESTARTED = "RESTARTED"
+    # 点击命中禁用控件（clickable=false/enabled=false）→ 硬失败，
+    # 避免连续无效点击被误判为"已是目标状态"（实测事故：锁定期连点 6 次
+    # 数字键全无效，仅报 NO_CHANGE 软失败，无法区分"禁用"与"无需操作"）
+    CLICK_ON_DISABLED = "CLICK_ON_DISABLED"
+    # App 桥接（TcpBridge）不可达：进程消失/端口无响应，命令级兜底裁决
+    BRIDGE_UNREACHABLE = "BRIDGE_UNREACHABLE"
 
 
 # 裁决 → 是否允许继续（硬失败语义：仅 SUCCESS 为真）
@@ -77,6 +83,8 @@ class Verdict:
             VerdictStatus.BACK_INEFFECTIVE: "↩️",
             VerdictStatus.CRASHED: "💥",
             VerdictStatus.RESTARTED: "🔄",
+            VerdictStatus.CLICK_ON_DISABLED: "🚫",
+            VerdictStatus.BRIDGE_UNREACHABLE: "🔌",
         }[self.status]
         print(f"{icon} {self.line()}")
 
@@ -126,7 +134,7 @@ def top_overlay(overlays: List[dict]) -> Optional[dict]:
 
 def overlay_summary(widgets: List[dict], overlay: dict, max_items: int = 6) -> str:
     """覆盖层子树内的可读文本（标题/按钮），用于裁决 reason"""
-    from engines.engines import _overlay_texts
+    from engines.helpers import _overlay_texts
     texts = _overlay_texts(widgets, overlay)
     return " / ".join(texts[:max_items])
 
@@ -159,7 +167,7 @@ def _find_close_x_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
     可点击、无文本、尺寸 36~150px、中心位于容器右上角区域（右 22% 内 + 上 22% 内）
     → 视为关闭钮，命中多个时取最贴右上角者。
     """
-    from engines.engines import _is_descendant_index
+    from engines.helpers import _is_descendant_index
     ov_idx = next((i for i, w in enumerate(widgets) if w is overlay), None)
     if ov_idx is None:
         return None
@@ -207,7 +215,7 @@ def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
     3. 同词多处命中时，优先 Button 类型、其次文本更短（更接近整串）；
     4. 找不到文本按钮时，兜底识别右上角“X”关闭钮（见 _find_close_x_button）。
     """
-    from engines.engines import _is_descendant_index
+    from engines.helpers import _is_descendant_index
     ov_idx = None
     for i, w in enumerate(widgets):
         if w is overlay:
@@ -234,17 +242,9 @@ def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
         if hits:
             def _rank(t: int):
                 w = widgets[t]
-                is_btn = 0 if (w.get('type', '') or '').lower() == 'button' else 1
-                return (is_btn, len((w.get('text', '') or '')), t)
+                return (len((w.get('text', '') or '')), t)
             best = sorted(hits, key=_rank)[0]
-            w = widgets[best]
-            txt = (w.get('text', '') or '').strip()
-            # 长文本的非按钮命中多半是标题/说明（如“不再提醒，可在…恢复”），
-            # 不该点它——视为未识别，继续找别的词（或返回 None）
-            if (w.get('type', '') or '').lower() != 'button' \
-                    and len(txt) > len(label) + 4:
-                continue
-            return w
+            return widgets[best]
     # 固定 ID 关闭按钮：ArkUI 源码写死 .id() 的关闭钮（如通用运营弹窗
     # AFCommonAlertView 的 dialog_cancel_btn）。比文本稳定、比 X 启发式可靠。
     for fid in WidgetTreeDiff.CLOSE_BUTTON_IDS:
@@ -274,7 +274,7 @@ def overlay_dismiss_hint(widgets: List[dict], overlay: dict) -> str:
     这里用于**判定"操作后是否留下未处理的确认弹窗"**——即使关闭按钮是
     自绘 Text（非 Button），也能识别出来。返回命中文案（如 '关闭'），无则 ''。
     """
-    from engines.engines import _is_descendant_index
+    from engines.helpers import _is_descendant_index
     ov_idx = None
     for i, w in enumerate(widgets):
         if w is overlay:
@@ -287,17 +287,155 @@ def overlay_dismiss_hint(widgets: List[dict], overlay: dict) -> str:
             if i == ov_idx or not _is_descendant_index(widgets, i, ov_idx):
                 continue
             txt = (widgets[i].get('text', '') or '').strip()
-            # 短文案才算按钮（避免命中含"关闭"字样的正文说明）
-            if txt and label.lower() in txt.lower() \
-                    and len(txt) <= len(label) + 6:
+            # 精确匹配才算按钮：子串匹配会把标题正文误判为按钮，
+            # 如“关闭推送时间段”“全天关闭”含“关闭”
+            if txt and txt.lower() == label.lower():
                 return txt
     return ''
+
+
+# ==================== 点击目标禁用判定（CLICK_ON_DISABLED 预检） ====================
+
+import re as _re
+
+
+class ClickTargetStatus:
+    """点击坐标命中控件的状态判定结果"""
+
+    def __init__(self, hit: bool, disabled: bool, not_clickable: bool,
+                 target: Optional[dict] = None,
+                 disabled_by: Optional[dict] = None,
+                 chain_desc: str = "",
+                 disabled_text: str = ""):
+        self.hit = hit                  # 是否命中任何控件
+        self.disabled = disabled        # 命中集合存在 enabled=false（级联禁用）
+        self.not_clickable = not_clickable  # 命中集合无任何 clickable=true
+        self.target = target            # DFS 序号最大的命中控件（最具体）
+        self.disabled_by = disabled_by  # 触发禁用判定的控件（enabled=false）
+        self.chain_desc = chain_desc    # 命中目标摘要（NO_CHANGE 提示用）
+        self.disabled_text = disabled_text  # 禁用控件自身或子树的文本（如数字键 '2'）
+
+
+def _bounds_contain(bounds_str: str, x: int, y: int) -> bool:
+    """解析 '[x1,y1][x2,y2]'，判断点是否在区域内"""
+    nums = _re.findall(r'-?\d+', str(bounds_str or ''))
+    if len(nums) < 4:
+        return False
+    left, top, right, bottom = (int(n) for n in nums[:4])
+    return left <= x < right and top <= y < bottom
+
+
+def _bounds_area(bounds_str) -> int:
+    """解析 '[x1,y1][x2,y2]' 面积；解析失败返回 -1（排序时沉底）"""
+    nums = _re.findall(r'-?\d+', str(bounds_str or ''))
+    if len(nums) < 4:
+        return -1
+    left, top, right, bottom = (int(n) for n in nums[:4])
+    return max(0, (right - left) * (bottom - top))
+
+
+def find_click_target_status(widgets: List[dict], x: int, y: int) -> ClickTargetStatus:
+    """判定坐标 (x, y) 的点击目标是否被禁用。
+
+    判定规则（保守，避免误报）：
+    - 命中 = bounds 包含该点的所有控件；**目标 = 面积最小的命中控件**
+      （最具体的实际目标。不能取 DFS 序号最大者：实测锁屏的全屏遮罩
+      RelativeContainer 序号大于键盘按钮会选错；也不能因存在 clickable=true
+      的全屏父容器就直接放行——锁屏 Stack clickable=true 仍拦不住子键禁用）
+    - 目标链（自身 → 祖先）上任何控件 enabled='false' → disabled=True
+      （ArkUI enabled(false) 级联禁用整个子树；典型：锁定期数字键
+      Button clickable=false enabled=false，点击必然无效）
+    - 无 disabled 且链上存在 clickable='true' 且 enabled≠'false' → 正常可点
+    - 无 disabled 且链上无可点控件 → not_clickable=True（保持 NO_CHANGE
+      原语义，不升级——透明容器/事件穿透等场景无法穷举）
+    - 未命中任何控件 → 全 False（不判禁用）
+    """
+    hits: List[dict] = [w for w in widgets
+                        if _bounds_contain(w.get('bounds', ''), x, y)]
+    # 过滤零面积装饰元素后取面积最小者；并列时取 DFS 序号大者（更靠内）
+    concrete = [w for w in hits if _bounds_area(w.get('bounds', '')) >= 4]
+    pool = concrete or hits
+    if not pool:
+        return ClickTargetStatus(hit=False, disabled=False, not_clickable=False)
+    target = min(pool, key=lambda w: (_bounds_area(w.get('bounds', '')),
+                                      -(w.get('render_order', 0) or 0)))
+
+    # 沿 parent_index 构建目标链
+    chain: List[dict] = [target]
+    cur = target.get('parent_index')
+    guard = 0
+    while cur is not None and 0 <= cur < len(widgets) and guard < 64:
+        chain.append(widgets[cur])
+        cur = widgets[cur].get('parent_index')
+        guard += 1
+
+    # 1) enabled=false 级联禁用：链上出现即判禁用
+    disabled_by = next((w for w in chain
+                        if str(w.get('enabled', '')).lower() == 'false'), None)
+    if disabled_by is not None:
+        return ClickTargetStatus(hit=True, disabled=True, not_clickable=False,
+                                 target=target, disabled_by=disabled_by,
+                                 chain_desc=_describe_click_chain([target]),
+                                 disabled_text=_first_descendant_text(widgets, target))
+
+    # 2) 链上存在可点且启用的控件 → 正常
+    if any(str(w.get('clickable', '')).lower() == 'true'
+           and str(w.get('enabled', '')).lower() != 'false'
+           for w in chain):
+        return ClickTargetStatus(hit=True, disabled=False, not_clickable=False,
+                                 target=target,
+                                 chain_desc=_describe_click_chain([target]))
+
+    # 3) 链上全不可点且无禁用 → not_clickable
+    return ClickTargetStatus(hit=True, disabled=False, not_clickable=True,
+                             target=target,
+                             chain_desc=_describe_click_chain([target]))
+
+
+def _first_descendant_text(widgets: List[dict], node: dict,
+                           max_depth: int = 3) -> str:
+    """取控件自身或后代（限深）的首个非空 Text（如数字键 Button 的 '2'）"""
+    txt = (node.get('text', '') or '').strip()
+    if txt:
+        return txt[:20]
+    try:
+        idx = widgets.index(node)
+    except ValueError:
+        return ""
+    out = ""
+    for i, w in enumerate(widgets):
+        if i == idx or not (w.get('text') or '').strip():
+            continue
+        cur = w.get('parent_index')
+        depth = 0
+        while cur is not None and 0 <= cur < len(widgets) and depth <= max_depth:
+            if cur == idx:
+                out = (w.get('text') or '').strip()[:20]
+                break
+            cur = widgets[cur].get('parent_index')
+            depth += 1
+        if out:
+            break
+    return out
+
+
+def _describe_click_chain(chain: List[dict]) -> str:
+    """命中链摘要：最上层控件的类型/文本/可点/可用（供 NO_CHANGE 提示）"""
+    if not chain:
+        return ""
+    w = chain[0]
+    parts = [f"type={w.get('type', '')}"]
+    txt = (w.get('text', '') or '').strip()
+    if txt:
+        parts.append(f"text='{txt[:20]}'")
+    parts.append(f"clickable={w.get('clickable', '')}")
+    parts.append(f"enabled={w.get('enabled', '')}")
+    return ", ".join(parts)
 
 
 # ==================== 裁决决策树 ====================
 
 def judge(crash_detector, after_analyzer, report,
-          before_route: Optional[List[str]], after_route: Optional[List[str]],
           is_back: bool = False, looks_like_desktop: bool = False,
           internal_restarted: bool = False,
           expectations: Optional[dict] = None) -> Verdict:
@@ -307,7 +445,6 @@ def judge(crash_detector, after_analyzer, report,
         crash_detector: CrashDetector
         after_analyzer: 操作后的控件树分析器
         report: 差异报告（route_changed / changes）
-        before_route / after_route: 路由前后快照
         is_back: 是否为返回类动作（无变化时标记 BACK_INEFFECTIVE）
         looks_like_desktop: 操作后是否疑似退到系统桌面
         internal_restarted: 是否检测到内部重启（须在 record_acc 更新基线前判定）
@@ -332,7 +469,7 @@ def judge(crash_detector, after_analyzer, report,
     widgets = after_analyzer.widgets
 
     # 覆盖层预检：用于识别"操作有变化但留下未处理弹窗"的假成功
-    screen0 = after_analyzer.get_screen_bounds() if after_analyzer else None
+    screen0 = after_analyzer.get_screen_bounds()
     overlays0 = [ov for ov in find_overlays(widgets, screen0)
                  if 'toast' not in (ov.get('type', '') or '').lower()]
 
@@ -349,6 +486,7 @@ def judge(crash_detector, after_analyzer, report,
         # （--auto-handle-dialog 时弹窗会被自动清理，不在此列）
         if overlays0 and not (expectations and expectations.get('auto_dialog')):
             top0 = top_overlay(overlays0)
+            assert top0 is not None
             btn0 = find_dismiss_button(widgets, top0)
             hint0 = (btn0.get('text', '') if btn0
                      else overlay_dismiss_hint(widgets, top0))
@@ -373,6 +511,7 @@ def judge(crash_detector, after_analyzer, report,
         if expectations and expectations.get('dialog'):
             return Verdict(VerdictStatus.SUCCESS, reason="弹窗已按预期出现")
         top = top_overlay(overlays)
+        assert top is not None
         summary = overlay_summary(widgets, top)
         btn = find_dismiss_button(widgets, top)
         suggestion = (f"点击弹窗按钮 '{btn.get('text', '')}' 关闭后重试"
@@ -424,7 +563,10 @@ class ActionPipeline:
 
     def _settle(self, timeout: float = 0.4):
         """UI 稳定窗：固定等待 timeout 秒，让 Toast/动画/惯性滚动先停下来。
+        --fast 模式下缩短为 0.1s。
         （纯 hdc 无 idle 检测 API；如后续需要，可改为对连续两次 dump 做指纹比对。）"""
+        if getattr(self.engine, 'fast_mode', False):
+            timeout = min(timeout, 0.1)
         time.sleep(timeout)
 
     # ---- 前置快照（支持复用历史基准，省一次 dump）----
@@ -434,7 +576,7 @@ class ActionPipeline:
 
         复用条件：未强制 fresh，且历史存在、新鲜、路由与当前一致。
         """
-        from engines.engines import _compute_page_signature
+        from engines.helpers import _compute_page_signature
         e = self.engine
 
         if not fresh_before:
@@ -465,11 +607,15 @@ class ActionPipeline:
             return False
 
     def _route_matches(self) -> bool:
-        """历史路由是否与当前路由一致（一致才敢复用基准）"""
+        """历史路由是否与当前路由一致（一致才敢复用基准）
+
+        用引擎的路由缓存（同一操作流程内复用最近一次查询结果，
+        _save_and_cleanup 保存后会重置），避免每步重复走 bridge 查询。
+        """
         saved = self.engine.manager.load_route_history()
         if saved is None:
             return False
-        current = WidgetTreeDiff.get_current_route(self.engine.device)
+        current = self.engine._get_current_route_cached()
         if current is None:
             # 拿不到当前路由时保守处理：允许复用（避免额外 dump 失去意义）
             return True
@@ -515,9 +661,7 @@ class ActionPipeline:
         Returns:
             裁决 + 断言是否全部通过（决定 exit code）
         """
-        from engines.engines import (_compute_page_signature, print_page_state_summary,
-                                     check_expectations_with_polling,
-                                     auto_handle_dialogs, STATE_TYPE_LABELS)
+        from engines.helpers import _compute_page_signature, print_page_state_summary, check_expectations_with_polling, auto_handle_dialogs
         e = self.engine
         print(f"执行: {desc}")
 
@@ -531,8 +675,43 @@ class ActionPipeline:
             before_widgets, before_route, before_sig, _reused = \
                 self._before_snapshot(skip_before=False, fresh_before=fresh_before)
             if before_widgets is None:
+                # 与 after 路径对称：dump 失败也要输出结构化裁决——
+                # AI 闭环依赖 ACTION_VERDICT 行作输入（四层反馈契约）
+                Verdict(VerdictStatus.CRASHED,
+                        reason="before dump 失败（uitest 并发锁/设备繁忙/闪退）",
+                        suggestion="检查应用是否存活（app restart）后重试").print()
                 self._capture_failure("before dump failed", crash=True)
                 return False
+
+        # 1.5 点击目标禁用预检：命中 clickable=false/enabled=false 控件时
+        # 直接硬失败（不执行无效点击）。此前锁定期连点数字键全无效仅报
+        # NO_CHANGE 软失败，Agent 无法区分"禁用"与"无需操作"而继续盲试。
+        pending_point = getattr(e, '_pending_point', None)
+        if pending_point is not None:
+            e._pending_point = None
+            if before_widgets:
+                cts = find_click_target_status(before_widgets,
+                                               pending_point[0], pending_point[1])
+                if cts.disabled:
+                    dis = cts.disabled_by or {}
+                    tgt = cts.target or {}
+                    dis_txt = cts.disabled_text
+                    reason = (f"点击目标被禁用: ({pending_point[0]},{pending_point[1]}) "
+                              f"命中 {tgt.get('type', '')}"
+                              + (f" '{(tgt.get('text') or '')[:20]}'"
+                                 if (tgt.get('text') or '').strip() else "")
+                              + f"，目标区域存在 enabled=false 的 "
+                                f"{dis.get('type', '')}"
+                              + (f" '{dis_txt}'" if dis_txt else "")
+                              + "，点击不会生效")
+                    verdict = Verdict(
+                        VerdictStatus.CLICK_ON_DISABLED,
+                        reason=reason,
+                        suggestion="目标区域控件当前不可交互（如锁定/冷却/置灰），"
+                                   "检查页面状态（tree dump --text）确认是否需要先解锁/等待")
+                    verdict.print()
+                    self._capture_failure("click on disabled widget")
+                    return False
 
         # 2. 崩溃基线 + 记录操作前 acc
         e.crash_detector.prime_baseline()
@@ -556,9 +735,11 @@ class ActionPipeline:
 
         # 3. 执行动作
         t0 = time.monotonic()
+        action_exc = None
         try:
             raw_ok = action_fn()
         except Exception as ex:
+            action_exc = ex
             print(f"❌ {desc} 执行异常: {ex}")
             Verdict(VerdictStatus.ERROR,
                     reason="action_exception: %s" % ex).print()
@@ -567,8 +748,11 @@ class ActionPipeline:
             print(f"❌ {desc} 执行失败")
             log_line("[time] op=%s elapsed_ms=%d status=ERROR"
                      % (desc, int((time.monotonic() - t0) * 1000)))
-            # 失败也必须给出结构化裁决（此前只有一句中文提示）
-            Verdict(VerdictStatus.ERROR, reason="action_failed").print()
+            # 失败也必须给出结构化裁决；异常分支已打印 ERROR
+            # （action_exception）时不重复打印——ACTION_VERDICT 契约
+            # 是"一次操作一行机器可读结论"
+            if action_exc is None:
+                Verdict(VerdictStatus.ERROR, reason="action_failed").print()
             e.crash_detector.detect_and_report()
             self._capture_failure("action_failed", crash=True)
             return False
@@ -584,6 +768,10 @@ class ActionPipeline:
             before_widgets, before_route, before_sig, desc,
             is_back, check_exit, expectations)
         if after is None:
+            # dump 失败（uitest 并发锁/闪退）也要输出结构化裁决：
+            # AI 闭环（CRASHED→app restart）依赖 ACTION_VERDICT 行作输入，
+            # 缺行会导致闭环无输入可消费（违反四层反馈契约）
+            verdict.print()
             self._capture_failure("after dump failed", crash=True)
             return False
 
@@ -604,6 +792,7 @@ class ActionPipeline:
                     before_widgets, before_route, before_sig,
                     f"{desc} [自愈重试]", is_back, check_exit, expectations)
                 if after is None:
+                    verdict.print()
                     self._capture_failure("after dump failed (retry)", crash=True)
                     return False
 
@@ -611,24 +800,45 @@ class ActionPipeline:
         print()
         verdict.print()
 
+        # 6.2 本次 dump 的归档 JSON 路径：操作后引擎已 dump 一次（差异报告用），
+        # 把归档路径直接给出，复核/精析解析该文件即可，省一次重复 tree dump
+        # （--fast 批量回归时静默，保持 ACTION_VERDICT 极简输出）
+        if not getattr(e, 'fast_mode', False):
+            json_path = getattr(after, '_archived_path', None)
+            if json_path:
+                print(f"📄 控件树 JSON: {json_path}")
+
+        # 6.1 NO_CHANGE 时附目标区域控件实况（含 enabled 状态），帮助区分
+        # "点到禁用/不可点控件"与"已是目标状态"——仅提示，不改变裁决
+        if (verdict.status == VerdictStatus.NO_CHANGE
+                and pending_point is not None and after is not None):
+            cts = find_click_target_status(after.widgets,
+                                           pending_point[0], pending_point[1])
+            if cts.hit and cts.chain_desc:
+                flag = "🚫 enabled=false" if cts.disabled else \
+                       ("⚠️ 命中链无 clickable=true" if cts.not_clickable else "")
+                print(f"🎯 目标 ({pending_point[0]},{pending_point[1]}) 命中控件: "
+                      f"{cts.chain_desc}" + (f"  ← {flag}" if flag else ""))
+
         # 6.5 失败留证（在 cleanup 之前，保证 dump 可归档）
         if not verdict.ok(expectations):
             self._capture_failure("verdict=%s" % verdict.status.value,
                                   analyzer=after)
 
-        # 7. 页面状态摘要 + 保存历史
+        # 7. 页面状态摘要
         same_page = None
-        if before_sig is not None:
+        if before_sig is not None and after is not None:
             same_page = (before_sig == _compute_page_signature(after.widgets))
-        print_page_state_summary(after, device=e.device,
-                                 prev_widgets=before_widgets,
-                                 route=e._get_current_route_cached(),
-                                 same_page=same_page)
-        e._save_and_cleanup(after, save_route=True)
+        if not getattr(e, 'fast_mode', False):
+            print_page_state_summary(after, device=e.device,
+                                     prev_widgets=before_widgets,
+                                     route=e._get_current_route_cached(),
+                                     same_page=same_page)
 
-        # 8. 断言
+        # 8. 断言（在保存历史/cleanup 之前：轮询与失败留证都复用本次 dump，
+        # cleanup 后 _temp_file 为 None，留证会丢失 dump 证据）
         ok = verdict.ok(expectations)
-        if expectations:
+        if expectations and after is not None:
             if not check_expectations_with_polling(
                     expectations, report=report,
                     initial_widgets=after.widgets,
@@ -636,9 +846,12 @@ class ActionPipeline:
                     cleanup_fn=lambda a: a.cleanup(),
                     device=e.device):
                 ok = False
-        if not ok:
-            # 断言失败（裁决本身成功）也要留证
+        if not ok and verdict.ok(expectations):
+            # 断言失败（裁决本身成功）才在此留证；裁决已失败时 6.5 已留证
             self._capture_failure("assertions failed", analyzer=after)
+
+        # 9. 保存历史 + cleanup（断言全部结束后才销毁本次 dump）
+        e._save_and_cleanup(after, save_route=True)
         return ok
 
     def _verdict_once(self, before_widgets, before_route, before_sig,
@@ -648,7 +861,6 @@ class ActionPipeline:
         Returns:
             (verdict, after_analyzer, report)；dump 失败时 (None, None, None)
         """
-        from engines.engines import _compute_page_signature
         e = self.engine
 
         after = e._dump_and_load("after")
@@ -664,22 +876,16 @@ class ActionPipeline:
         e.crash_detector.detect()
 
         after_route = e._get_current_route_cached()
-        after_sig = _compute_page_signature(after.widgets)
 
-        # 差异比较（路由变化或内容变化）
-        report = None
-        if before_sig is not None and before_sig != after_sig:
-            from engines.diff_engine import ChangeReport
-            print(f"🧭 页面变化: breadcrumb={before_sig}  ⟶  {after_sig}")
-            after.overview()
-            report = ChangeReport(desc)
-            report.route_changed = True
-        else:
-            report = e._compare_with_history(after, desc)
+        # 差异比较：route_changed 由真实路由栈对比产生（compare 内部
+        # after_route vs before_route），内容变化由全树 diff 产生。
+        # 不用页面签名捷径判路由——签名（顶部文本集合）在顶部区域出现
+        # banner/标题/覆盖层文本时也会变，直接判 route_changed 会把
+        # BLOCKED_BY_DIALOG/NO_CHANGE 误报成 SUCCESS（exit 0）
+        report = e._compare_with_history(after, desc)
 
         looks_desktop = check_exit and self._looks_like_desktop(after)
         verdict = judge(e.crash_detector, after, report,
-                        before_route, after_route,
                         is_back=is_back, looks_like_desktop=looks_desktop,
                         internal_restarted=internal_restarted,
                         expectations=expectations)
@@ -702,11 +908,12 @@ class ActionPipeline:
                 if re_report is not None and (re_report.changes
                                               or re_report.route_changed):
                     print("✅ 复查检测到变化（此前为异步未稳定），以复查结果为准")
-                    recheck_route = e._get_current_route_cached()
+                    # 复查通过也更新 acc 基线（主路径已更新，复查替换结果时同步）
+                    e.crash_detector.record_acc(recheck.widgets)
                     verdict = judge(e.crash_detector, recheck, re_report,
-                                    before_route, recheck_route,
                                     is_back=is_back,
-                                    looks_like_desktop=looks_like_desktop,
+                                    looks_like_desktop=looks_desktop,
+                                    internal_restarted=internal_restarted,
                                     expectations=expectations)
                     after.cleanup()
                     return verdict, recheck, re_report
@@ -716,7 +923,7 @@ class ActionPipeline:
 
     @staticmethod
     def _has_state_controls(widgets) -> bool:
-        from engines.engines import STATE_TYPE_LABELS
+        from engines.helpers import STATE_TYPE_LABELS
         return any((w.get('type', '') or '').lower() in STATE_TYPE_LABELS
                    for w in widgets)
 

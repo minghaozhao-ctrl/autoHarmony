@@ -13,6 +13,20 @@ host-local 的「设备占用声明」：
   - 命令启动时对目标设备登记或续约一条 claim（带心跳时间戳）；
   - 若设备被另一个「仍活跃」的会话占用，则拒绝执行（除非等待或显式抢占）。
 
+稳定会话标识
+------------
+opencode 的 ``shell.env`` 插件（``~/.config/opencode/plugins/device-session-env.ts``）
+会把**根 sessionID** 注入 ``HMUITEST_SESSION_ID``，因此同一对话（含其 task 子
+agent）解析出同一个会话 id；不同对话才是不同会话，从而做到「一个会话独占一台设备」。
+没有该变量时退回下面的 cwd / worktree 推断。
+
+活跃性判定
+----------
+只用 **claim 心跳 TTL**（默认 900s，可用 ``HMUITEST_CLAIM_TTL`` 调整）：心跳新于 TTL
+视为活跃（会话持有中）；过期即成 stale，可被其他会话接替并给出提示。
+**不看 pid**：每条命令都是短进程、命令结束 pid 即死，若以 pid 存活判定活跃，则同一
+会话的下一条命令会把自己的 claim 判为 stale 而被抢走，跨命令就锁不住了。
+
 因为没有常驻进程，活跃性用 **claim 心跳 TTL** 判定（默认 900s）：心跳新于 TTL
 视为活跃；过期即成 stale，可被其他会话接替并给出提示。
 
@@ -26,7 +40,7 @@ host-local 的「设备占用声明」：
 策略（环境变量）
 ----------------
   HMUITEST_SESSION_ID   显式会话名；0/off/false/no/none/- 或空 → 关闭设备锁
-  HMUITEST_DEVICE_LOCK  enforce(默认) | off   （off 只登记不拦截？不——完全关闭）
+  HMUITEST_DEVICE_LOCK  enforce(默认) | off   （off=完全关闭：不登记也不拦截）
   HMUITEST_CLAIM_TTL    心跳过期秒数（默认 900）
   HMUITEST_CLAIM_DIR    声明目录（默认 ~/.hmuitest/device-claims）
 
@@ -289,6 +303,11 @@ def ensure_claim(device: str,
                 return ClaimOutcome(True, "RENEWED")
             if cur:
                 age = _age(cur, now)
+                # 活跃性只按心跳租约判定：每条命令都是短进程，pid 命令一结束就死，
+                # 若把「pid 已死」当作失效，则同一会话的下一条命令就会把自己的
+                # claim 抢占掉 → 跨命令根本锁不住。会话标识稳定后（见 shell.env
+                # 插件注入 HMUITEST_SESSION_ID），靠 session 相等即可续约，
+                # 不相等且心跳未过期则视为被占用。
                 live = age < _ttl()
                 if live and not takeover:
                     if time.monotonic() < deadline:
@@ -377,11 +396,3 @@ def release(device: Optional[str] = None,
         _CLAIMED.discard(dev)
         removed.append(cur)
     return removed
-
-
-def release_current_session() -> List[Dict]:
-    """释放本会话持有的全部 claim。"""
-    session = resolve_session_id()
-    if not session:
-        return []
-    return release(session=session)

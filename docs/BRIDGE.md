@@ -84,6 +84,11 @@ HMUITEST_BRIDGE_CLASS=myproject.bridge:DigitalHomeBridge \
   autoharmony script run plan.json
 ```
 
+The `app` subcommands validate these required methods at startup against the
+contract in `bridge/app_bridge.py`; a missing method yields
+`ACTION_VERDICT: ERROR | reason=bridge_methods_missing` (with the missing names
+and a fix suggestion) instead of a Python traceback.
+
 The framework does **not** ship concrete business methods — that is intentional.
 Missing methods fail cleanly (`ACTION_VERDICT: ERROR | reason=bridge_action_unsupported`),
 and connection/RPC errors are downgraded to a step failure

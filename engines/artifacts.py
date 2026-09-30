@@ -11,13 +11,16 @@ UI 动作失败时把"当时现场"落盘，便于事后/离线定位而无需�
 目录：<日志目录>/artifacts/<YYYYMMDD>/<HHMMSS.mmm>-pid<pid>-<tag>/
 默认开启；HMUITEST_ARTIFACTS=0/off/false/no 关闭（CLI 侧 --no-artifacts 同义）。
 留证失败一律吞掉：绝不影响主流程，也不改变退出码。
+总耗时受 TOTAL_BUDGET_SEC 约束（默认 12s），持续输出型命令（hilog）靠短超时截断并保留已捕获的部分输出。
 """
 
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -26,6 +29,16 @@ from utils.common import run_hdc_command
 
 # hilog 切片保留的最大行数（尾部为最近日志）
 HILOG_TAIL_LINES = 300
+
+# 各产物超时（秒）：留证是"尽力而为"，绝不能拖慢主流程
+SCREENSHOT_TIMEOUT_SEC = 6
+HILOG_TIMEOUT_SEC = 2
+FAULT_TIMEOUT_SEC = 8
+# 留证总耗时预算（秒）：超出后放弃剩余产物
+TOTAL_BUDGET_SEC = 12
+
+# hilog 行首时间戳（MM-DD HH:MM:SS.mmm），用于过滤命令错误输出
+_HILOG_LINE_RE = re.compile(r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}")
 
 _disabled = False
 
@@ -66,23 +79,73 @@ def _hdc(device: Optional[str], args: List[str]) -> List[str]:
     return cmd + args
 
 
-def capture_screenshot(device: Optional[str], out_path: str) -> Optional[str]:
+def _run_hdc_capture(args: List[str], timeout: float) -> str:
+    """执行 hdc 命令并返回输出；超时则杀掉进程并返回已捕获的部分输出。
+
+    持续输出型命令（如不带 -x 的 hilog）不会自行退出，靠超时截断，
+    已写入管道缓冲的日志仍可保留，避免"空手而归 + 长时间阻塞"。
+    """
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except Exception:
+            out = ""
+        return out or ""
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return ""
+
+
+def _looks_like_hilog(out: str) -> bool:
+    """输出中是否含 hilog 日志行（过滤 hilog 不支持某参数时的报错文本）。"""
+    for line in out.splitlines():
+        if _HILOG_LINE_RE.match(line.strip()):
+            return True
+    return False
+
+
+def capture_screenshot(device: Optional[str], out_path: str,
+                       timeout: float = SCREENSHOT_TIMEOUT_SEC) -> Optional[str]:
     """截屏到 out_path；成功返回路径，失败返回 None。"""
     remote = "/data/local/tmp/_screenshot_tmp.png"
     ok, _ = run_hdc_command(
-        _hdc(device, ["shell", "uitest", "screenCap", "-p", remote]), 30)
+        _hdc(device, ["shell", "uitest", "screenCap", "-p", remote]), max(1, int(timeout)))
     if not ok:
         return None
-    ok2, _ = run_hdc_command(_hdc(device, ["file", "recv", remote, out_path]), 30)
+    ok2, _ = run_hdc_command(_hdc(device, ["file", "recv", remote, out_path]),
+                             max(1, int(timeout)))
     if ok2 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
         return out_path
     return None
 
 
-def _capture_hilog(device: Optional[str], out_path: str) -> Optional[str]:
+def _capture_hilog(device: Optional[str], out_path: str,
+                   timeout: float = HILOG_TIMEOUT_SEC) -> Optional[str]:
+    """抓取 hilog 末尾切片。
+
+    优先 `hilog -x`（导出缓冲区后自行退出，正常 <1s）；老设备不支持时回退到
+    持续输出模式 `hilog`，靠短超时截断并保留已捕获的部分日志。
+    最长约 2×timeout，避免失败留证拖慢主流程。
+    """
     for args in (["shell", "hilog", "-x"], ["shell", "hilog"]):
-        ok, out = run_hdc_command(_hdc(device, args), 20)
-        if ok and out:
+        out = _run_hdc_capture(_hdc(device, args), timeout)
+        if out and _looks_like_hilog(out):
             lines = out.splitlines()[-HILOG_TAIL_LINES:]
             with open(out_path, "w", encoding="utf-8", errors="replace") as f:
                 f.write("\n".join(lines) + "\n")
@@ -90,8 +153,10 @@ def _capture_hilog(device: Optional[str], out_path: str) -> Optional[str]:
     return None
 
 
-def _capture_fault(device: Optional[str], out_path: str) -> Optional[str]:
-    ok, out = run_hdc_command(_hdc(device, ["shell", "hidumper", "-e"]), 60)
+def _capture_fault(device: Optional[str], out_path: str,
+                   timeout: float = FAULT_TIMEOUT_SEC) -> Optional[str]:
+    ok, out = run_hdc_command(_hdc(device, ["shell", "hidumper", "-e"]),
+                              max(1, int(timeout)))
     if ok and out:
         with open(out_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(out)
@@ -120,14 +185,30 @@ def capture_failure(device: Optional[str], reason: str = "",
         return None
     try:
         run_dir = _run_dir(tag)
-        found: Dict[str, Optional[str]] = {
-            "screenshot": capture_screenshot(
-                device, os.path.join(run_dir, "screenshot.png")),
-            "hilog": _capture_hilog(device, os.path.join(run_dir, "hilog.txt")),
-        }
-        if crash:
+        found: Dict[str, Optional[str]] = {}
+        deadline = time.monotonic() + TOTAL_BUDGET_SEC
+        # 进度提示走 stderr 并 flush，避免管道缓冲造成"卡死"观感
+        print("📦 保存失败现场（截图/日志）...", file=sys.stderr, flush=True)
+
+        def _left() -> float:
+            return deadline - time.monotonic()
+
+        if _left() > 0:
+            found["screenshot"] = capture_screenshot(
+                device, os.path.join(run_dir, "screenshot.png"),
+                min(SCREENSHOT_TIMEOUT_SEC, _left()))
+            if found["screenshot"]:
+                # 截图成功 → 单独打印文件路径，方便直接查看/引用
+                print("📸 截图: %s" % found["screenshot"],
+                      file=sys.stderr, flush=True)
+        if _left() > 0:
+            found["hilog"] = _capture_hilog(
+                device, os.path.join(run_dir, "hilog.txt"),
+                min(HILOG_TIMEOUT_SEC, _left()))
+        if crash and _left() > 0:
             found["faultlog"] = _capture_fault(
-                device, os.path.join(run_dir, "hidumper-e.txt"))
+                device, os.path.join(run_dir, "hidumper-e.txt"),
+                min(FAULT_TIMEOUT_SEC, _left()))
 
         dump_src = (getattr(analyzer, "_temp_file", None)
                     or getattr(analyzer, "json_file", None))

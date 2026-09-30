@@ -26,6 +26,21 @@ _ROUTE_FAIL_TTL = 2.0
 # 永久禁用：TcpBridge 无 get_current_route 方法（AttributeError，协议未实现）
 # 时，本进程内不再尝试，彻底消除 fport 抖动。
 _ROUTE_DISABLED: Dict[str, bool] = {}
+
+
+def _cleanup_route_bridges() -> None:
+    """进程退出前关闭路由查询用的 bridge（清理 fport 规则）——
+    否则 fport tcp:X tcp:9999 永久残留在 hdc daemon，逐次累积"""
+    for bridge in list(_ROUTE_BRIDGES.values()):
+        try:
+            bridge.close()
+        except Exception:
+            pass
+    _ROUTE_BRIDGES.clear()
+
+
+import atexit as _atexit
+_atexit.register(_cleanup_route_bridges)
 # pagePath 回退：app 前台时 `uitest dumpLayout` 的窗口节点自带 pagePath
 # （如 pages/LaunchPage）。dump 时登记，get_current_route 在 bridge 无果时
 # 直接返回，纯 hdc、零额外开销。
@@ -108,7 +123,7 @@ class Change:
 class ChangeReport:
     """变化报告"""
 
-    def __init__(self, operation: str = "", compact: bool = True):
+    def __init__(self, operation: str = ""):
         self.operation = operation
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.changes: List[Change] = []
@@ -116,9 +131,6 @@ class ChangeReport:
         self.before_route: Optional[List[str]] = None
         self.after_route: Optional[List[str]] = None
         self.after_analyzer = None
-        self.before_overlays: List[Dict] = []
-        self.after_overlays: List[Dict] = []
-        self.compact = compact
 
     def add_change(self, change: Change):
         self.changes.append(change)
@@ -131,22 +143,12 @@ class ChangeReport:
         self.before_route = before_route
         self.after_route = after_route
 
-    def has_dialog(self) -> bool:
-        for change in self.changes:
-            if change.type == ChangeType.ADDED:
-                widget_type = change.widget.get('type', '').lower()
-                if widget_type in ['dialog', 'alertdialog', 'sheet', 'popup']:
-                    return True
-        return False
-
     def print(self):
         print()
         if self.route_changed:
             self._print_route_report()
-        elif self.compact:
-            self._print_compact_report()
         else:
-            self._print_change_report()
+            self._print_compact_report()
         print()
 
     def _print_route_report(self):
@@ -175,9 +177,6 @@ class ChangeReport:
         print()
         if self.after_analyzer:
             print("  " + "=" * 80)
-            print("  📋 新页面内容概览")
-            print("  " + "=" * 80)
-            self.after_analyzer.overview()
         print("PAGE_RESULT: ROUTE_CHANGED")
 
     @staticmethod
@@ -306,159 +305,6 @@ class ChangeReport:
 
         print("PAGE_RESULT: CHANGES_DETECTED")
 
-    def _print_change_report(self):
-        print("=" * 100)
-        print("📋 组件树变化报告")
-        print("=" * 100)
-        print(f"  操作: {self.operation}")
-        print(f"  时间: {self.timestamp}")
-        print()
-
-        stats = defaultdict(int)
-        for change in self.changes:
-            stats[change.type.value] += 1
-        print("📊 统计数据:")
-        for change_type, count in stats.items():
-            print(f"  {change_type}: {count}")
-        print()
-
-        if not self.changes:
-            print("  ✅ 未检测到显著变化")
-            print("PAGE_RESULT: NO_CHANGES")
-            return
-
-        overlay_types = {ChangeType.OVERLAY_APPEARED, ChangeType.OVERLAY_DISAPPEARED}
-        occluded_types = {ChangeType.OCCLUDED}
-        revealed_types = {ChangeType.REVEALED}
-
-        overlay_changes = [c for c in self.changes if c.type in overlay_types]
-        occluded_changes = [c for c in self.changes if c.type in occluded_types]
-        revealed_changes = [c for c in self.changes if c.type in revealed_types]
-        other_changes = [c for c in self.changes
-                         if c.type not in overlay_types
-                         and c.type not in occluded_types
-                         and c.type not in revealed_types]
-
-        has_popup_section = bool(overlay_changes or occluded_changes or revealed_changes)
-
-        if has_popup_section:
-            self._print_section_with_type("🪟 覆盖层变化", overlay_changes)
-            self._print_section_with_type("🌫️ 被遮挡的底层控件", occluded_changes)
-            self._print_section_with_type("✨ 解除遮挡的控件", revealed_changes)
-            self._print_grouped_changes(other_changes)
-        else:
-            self._print_grouped_changes(self.changes)
-        print("PAGE_RESULT: CHANGES_DETECTED")
-
-    def _print_section_with_type(self, title: str, changes: List[Change]):
-        if not changes:
-            return
-        print("  " + "-" * 80)
-        print(f"  {title} ({len(changes)})")
-        print("  " + "-" * 80)
-        detail_types = {ChangeType.TEXT_CHANGED, ChangeType.POSITION_CHANGED,
-                        ChangeType.STATE_CHANGED, ChangeType.PROPERTY_CHANGED}
-        self._print_change_tree(changes, detail_types)
-        print()
-
-    def _print_grouped_changes(self, changes: List[Change]):
-        if not changes:
-            return
-        type_groups = defaultdict(list)
-        for c in changes:
-            type_groups[c.type.value].append(c)
-
-        detail_types = {ChangeType.TEXT_CHANGED, ChangeType.POSITION_CHANGED,
-                       ChangeType.STATE_CHANGED, ChangeType.PROPERTY_CHANGED}
-
-        for type_name, group in type_groups.items():
-            print("  " + "-" * 80)
-            print(f"  {type_name} ({len(group)})")
-            print("  " + "-" * 80)
-            self._print_change_tree(group, detail_types)
-            print()
-
-    def _print_change_tree(self, changes: List[Change], detail_types: set):
-        parsed_bounds = []
-        for change in changes:
-            b = WidgetTreeDiff._parse_bounds(change.widget.get('bounds', ''))
-            parsed_bounds.append(b)
-
-        parent_idx = [-1] * len(changes)
-        for i in range(len(changes)):
-            if not parsed_bounds[i]:
-                continue
-            best_parent = -1
-            best_area = float('inf')
-            bi = parsed_bounds[i]
-            for j in range(len(changes)):
-                if i == j or not parsed_bounds[j]:
-                    continue
-                bj = parsed_bounds[j]
-                if (bj[0] <= bi[0] and bj[1] <= bi[1] and
-                        bj[2] >= bi[2] and bj[3] >= bi[3] and
-                        (bj[0] != bi[0] or bj[1] != bi[1] or
-                         bj[2] != bi[2] or bj[3] != bi[3])):
-                    area = (bj[2] - bj[0]) * (bj[3] - bj[1])
-                    if area < best_area:
-                        best_area = area
-                        best_parent = j
-            parent_idx[i] = best_parent
-
-        children_map: Dict[int, List[int]] = defaultdict(list)
-        roots: List[int] = []
-        for i in range(len(changes)):
-            if parent_idx[i] >= 0:
-                children_map[parent_idx[i]].append(i)
-            else:
-                roots.append(i)
-
-        def print_node(idx: int, prefix: str, is_last: bool):
-            change = changes[idx]
-            branch = "└── " if is_last else "├── "
-            child_prefix = prefix + ("    " if is_last else "│   ")
-
-            if change.type in detail_types:
-                self._print_change_detail(change, prefix + branch)
-            else:
-                self._print_widget_info(change.widget, prefix + branch)
-
-            child_indices = children_map.get(idx, [])
-            for ci, child_idx in enumerate(child_indices):
-                print_node(child_idx, child_prefix, ci == len(child_indices) - 1)
-
-        for i, root_idx in enumerate(roots):
-            print_node(root_idx, "  ", i == len(roots) - 1)
-
-    def _print_change_detail(self, change: Change, indent: str = ""):
-        widget_type = change.widget.get('type', 'Unknown')
-        text = change.widget.get('text', '')
-        bounds = change.widget.get('bounds', '')
-
-        header = f"{indent}{widget_type}"
-        if text:
-            header += f" \"{text[:35]}\""
-        if bounds:
-            header += f"  {bounds}"
-        print(header)
-
-        if change.type == ChangeType.TEXT_CHANGED and change.before and change.after:
-            before_text = (change.before.get('text', '') or change.before.get('hint', ''))[:35]
-            after_text = (change.after.get('text', '') or change.after.get('hint', ''))[:35]
-            print(f"{indent}│   └── \"{before_text}\" → \"{after_text}\"")
-
-        if change.type == ChangeType.POSITION_CHANGED and change.before and change.after:
-            before_bounds = change.before.get('bounds', '')
-            after_bounds = change.after.get('bounds', '')
-            distance = WidgetTreeDiff._calculate_distance(before_bounds, after_bounds)
-            print(f"{indent}│   └── {before_bounds} → {after_bounds} (距离: {distance:.1f}px)")
-
-        if change.type == ChangeType.STATE_CHANGED and change.before and change.after:
-            self._print_state_diff(change.before, change.after)
-
-        if change.type == ChangeType.PROPERTY_CHANGED and change.before and change.after:
-            self._print_property_diff(change.before, change.after)
-
     @staticmethod
     def _print_state_diff(before: Dict, after: Dict):
         state_attrs = [
@@ -470,37 +316,16 @@ class ChangeReport:
             if before.get(attr) != after.get(attr):
                 print(f"  {attr}: {before.get(attr)} → {after.get(attr)}")
 
-    @staticmethod
-    def _print_property_diff(before: Dict, after: Dict):
-        if (before.get('id') or '') != (after.get('id') or ''):
-            print(f"  id: \"{before.get('id', '')}\" → \"{after.get('id', '')}\"")
-        if (before.get('accessibilityId') or '') != (after.get('accessibilityId') or ''):
-            print(f"  accessibilityId: \"{before.get('accessibilityId', '')}\" → \"{after.get('accessibilityId', '')}\"")
-        if (before.get('description') or '') != (after.get('description') or ''):
-            print(f"  description: \"{before.get('description', '')}\" → \"{after.get('description', '')}\"")
-
-    def _print_widget_info(self, widget: Dict, indent: str = ""):
-        widget_type = widget.get('type', 'Unknown')
-        widget_id = widget.get('id', '')
-        text = widget.get('text', '')
-        hint = widget.get('hint', '')
-        bounds = widget.get('bounds', '')
-
-        line = f"{indent}{widget_type}"
-        if widget_id:
-            line += f" id=\"{widget_id[:30]}\""
-        display_text = text or hint
-        if display_text:
-            line += f" \"{display_text[:35]}\""
-        if bounds:
-            line += f"  {bounds}"
-        print(line)
-
 
 # ==================== 控件树差异比较器 ====================
 
 class WidgetTreeDiff:
     """组件树差异比较器"""
+
+    # 屏幕尺寸回退默认值（真实设备拿不到 bounds 时用）——单一事实来源，
+    # 勿再各处散落 1080x2400/1260x2720 两套假设
+    DEFAULT_SCREEN_W = 1260
+    DEFAULT_SCREEN_H = 2720
 
     LAYOUT_TYPES = {
         'column', 'row', 'stack', 'flex', 'scroll', 'list', 'grid',
@@ -554,8 +379,7 @@ class WidgetTreeDiff:
         'builderproxynode',
     }
 
-    # 弹窗关闭按钮（单一事实来源；verdict.DISMISS_BUTTONS 与
-    # engines.AUTO_DIALOG_BUTTONS 均引用本表，勿再各自拷贝）。
+    # 弹窗关闭按钮（单一事实来源；verdict.DISMISS_BUTTONS 引用本表，勿再拷贝）。
     # 顺序即优先级：**负向/跳过类在前**（尽量无副作用地关掉弹窗），
     # 中性/正向类仅作兜底（弹窗只有正向按钮时才点）。
     DIALOG_BUTTON_TEXTS = [
@@ -566,6 +390,12 @@ class WidgetTreeDiff:
         "同意", "允许", "仅在使用中允许", "确定", "继续", "好的",
         "知道了", "我知道了", "立即开启", "去开启", "授权",
     ]
+
+    # 按钮文本精确匹配集合：用于“容器是否含确认/取消按钮”判定。
+    # 必须精确匹配——子串匹配会把页面标题正文误判为按钮，
+    # 例如“关闭推送时间段”“全天关闭”含“关闭”，导致页面根容器
+    # （NavDestinationContent/Scroll）被误报为弹窗覆盖层。
+    DIALOG_BUTTON_TEXT_SET = {b.lower() for b in DIALOG_BUTTON_TEXTS}
 
     # 固定 ID 的关闭按钮（ArkUI 源码写死 .id() 的弹窗关闭钮）。
     # 比文本稳定（文本/资源多为服务端下发），比右上角 X 启发式可靠。
@@ -586,7 +416,9 @@ class WidgetTreeDiff:
     def _parse_bounds(bounds_str: str) -> Optional[Tuple[int, int, int, int]]:
         if not bounds_str:
             return None
-        match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        # 负坐标：margin-top 为负的隐藏输入框 bounds 含负数（与
+        # verdict._bounds_contain 的解析保持一致，勿再分叉）
+        match = re.match(r'\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]', bounds_str)
         if match:
             return (int(match.group(1)), int(match.group(2)),
                     int(match.group(3)), int(match.group(4)))
@@ -618,7 +450,8 @@ class WidgetTreeDiff:
                     area = (b[2] - b[0]) * (b[3] - b[1])
                     if area > best_area:
                         best, best_area = b, area
-            screen_bounds = best if best else (0, 0, 1080, 2400)
+            screen_bounds = best if best else \
+                (0, 0, WidgetTreeDiff.DEFAULT_SCREEN_W, WidgetTreeDiff.DEFAULT_SCREEN_H)
         screen_w = screen_bounds[2] - screen_bounds[0]
         screen_h = screen_bounds[3] - screen_bounds[1]
         screen_area = max(screen_w * screen_h, 1)
@@ -722,11 +555,10 @@ class WidgetTreeDiff:
                 for j in range(len(widgets)):
                     if j == idx or not _is_visible(widgets[j]):
                         continue
-                    txt = (widgets[j].get('text', '') or '').lower()
+                    txt = (widgets[j].get('text', '') or '').strip().lower()
                     if not txt:
                         continue
-                    if any(b.lower() in txt
-                           for b in WidgetTreeDiff.DIALOG_BUTTON_TEXTS) \
+                    if txt in WidgetTreeDiff.DIALOG_BUTTON_TEXT_SET \
                             and _is_descendant_of(j, idx):
                         has_dialog_btn = True
                         break
@@ -794,7 +626,12 @@ class WidgetTreeDiff:
                                 after_widgets: List[Dict]) -> List[Change]:
         def _key(w: Dict):
             wid = w.get('id') or w.get('accessibilityId')
-            return (wid or id(w), w.get('type'), w.get('text'))
+            if wid:
+                return (wid, w.get('type'), w.get('text'))
+            # 无 id 弹窗（toast/menu/custom dialog 常见）：before/after 是
+            # 两次独立 dump 的不同对象，id(w) 必不相同 → 产生假 appeared/
+            # disappeared 噪音对。改用内容签名兜底（type+text+bounds）
+            return ('', w.get('type'), w.get('text'), w.get('bounds'))
 
         before_map = {_key(w): w for w in before_widgets if WidgetTreeDiff.is_overlay(w)}
         after_map = {_key(w): w for w in after_widgets if WidgetTreeDiff.is_overlay(w)}
@@ -820,7 +657,8 @@ class WidgetTreeDiff:
         return bundle in WidgetTreeDiff.SYSTEM_UI_BUNDLES
 
     @staticmethod
-    def is_significant_widget(widget: Dict) -> bool:
+    def is_significant_widget(widget: Dict,
+                              screen_area: Optional[int] = None) -> bool:
         widget_type = widget.get('type', '').lower()
         if widget_type in WidgetTreeDiff.PERSONALIZED_TYPES:
             return True
@@ -835,7 +673,10 @@ class WidgetTreeDiff:
         bounds = WidgetTreeDiff._parse_bounds(widget.get('bounds', ''))
         if bounds:
             area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
-            if area >= 1080 * 2400 * 0.5:
+            # 屏幕面积阈值：compare 传入实际值（避免硬编码分辨率，与
+            # detect_overlays 同原则）；None 时回退默认屏幕面积
+            if area >= (screen_area or WidgetTreeDiff.DEFAULT_SCREEN_W
+                        * WidgetTreeDiff.DEFAULT_SCREEN_H) * 0.5:
                 return True
         return False
 
@@ -878,7 +719,10 @@ class WidgetTreeDiff:
         try:
             import time as _time
             import sys
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            # 去重插入（进程内多次调用防 sys.path 膨胀）
+            _root = os.path.dirname(os.path.abspath(__file__))
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
             from bridge.tcp_bridge import TcpBridge
             from utils.hdc import detect_device_id
             dev = device or detect_device_id()
@@ -896,7 +740,7 @@ class WidgetTreeDiff:
                 return None
             bridge = _ROUTE_BRIDGES.get(dev)
             if bridge is None:
-                bridge = TcpBridge(device=dev)
+                bridge = TcpBridge(device=dev, timeout=3)
                 _ROUTE_BRIDGES[dev] = bridge
             try:
                 return bridge.get_current_route()
@@ -911,7 +755,7 @@ class WidgetTreeDiff:
                 except Exception:
                     pass
                 try:
-                    bridge = TcpBridge(device=dev)
+                    bridge = TcpBridge(device=dev, timeout=3)
                     _ROUTE_BRIDGES[dev] = bridge
                     return bridge.get_current_route()
                 except Exception:
@@ -932,15 +776,24 @@ class WidgetTreeDiff:
                 after_analyzer=None) -> ChangeReport:
         report = ChangeReport(operation)
 
+        # 实际屏幕面积（根节点 bounds）——显著控件阈值用，避免硬编码分辨率
+        screen_area = None
+        first = before_widgets[0] if before_widgets else \
+            (after_widgets[0] if after_widgets else None)
+        if first is not None:
+            root = WidgetTreeDiff._parse_bounds(first.get('bounds', ''))
+            if root:
+                screen_area = (root[2] - root[0]) * (root[3] - root[1])
+
         # 覆盖层检测必须使用原始（未过滤）小部件列表，因为 parent_index 指向原始索引
         before_overlays = self.detect_overlays(before_widgets, after_analyzer.get_screen_bounds() if after_analyzer else None)
         after_overlays = self.detect_overlays(after_widgets, after_analyzer.get_screen_bounds() if after_analyzer else None)
         # 过滤：非显著控件 + 系统 UI（状态栏时钟/电量等会每秒变化，制造伪 diff）
         before_widgets = [w for w in before_widgets
-                          if self.is_significant_widget(w)
+                          if self.is_significant_widget(w, screen_area)
                           and not self.is_system_ui_widget(w)]
         after_widgets = [w for w in after_widgets
-                         if self.is_significant_widget(w)
+                         if self.is_significant_widget(w, screen_area)
                          and not self.is_system_ui_widget(w)]
 
         if before_route and after_route:
@@ -952,8 +805,6 @@ class WidgetTreeDiff:
         overlay_changes = self._detect_overlay_changes(before_widgets, after_widgets)
         for change in overlay_changes:
             report.add_change(change)
-        if overlay_changes:
-            report.changes = overlay_changes + [c for c in report.changes if c not in overlay_changes]
 
         matched_pairs = []
         unmatched_before = set(range(len(before_widgets)))
@@ -987,12 +838,18 @@ class WidgetTreeDiff:
         after_by_id = self._build_id_index(after_widgets)
 
         for i, widget in enumerate(before_widgets):
+            # 跳过 uniqueId 阶段已配对的控件——id/accessibilityId 与
+            # uniqueId 高度重叠（实测 375/376 同时具备），不去重会重复
+            # 配对 → 变化计数翻倍
+            if i not in unmatched_before:
+                continue
             widget_id = widget.get('id') or widget.get('accessibilityId')
             if widget_id:
                 widget_id_lower = widget_id.lower()
                 if widget_id_lower in after_by_id:
                     candidates = after_by_id[widget_id_lower]
-                    if len(candidates) == 1:
+                    if len(candidates) == 1 \
+                            and candidates[0]['_index'] in unmatched_after:
                         matched_pairs.append((widget, candidates[0], 1.0))
                         unmatched_before.discard(i)
                         unmatched_after.discard(candidates[0]['_index'])
@@ -1139,41 +996,14 @@ def _safe_dirname(name: str) -> str:
     return re.sub(r'[^0-9A-Za-z._-]', '_', name or '') or 'default'
 
 
-_OPENCODE_SESSION_RE = re.compile(r'[/\\]session-([0-9a-fA-F][0-9a-fA-F-]{6,})')
-_SESSION_OFF = {'0', 'off', 'false', 'no', 'none', '-'}
-
-
-def _opencode_session_id() -> Optional[str]:
-    """从 opencode/agent 的对话工作目录推断会话标识。
-
-    opencode 不为每个对话注入会话 id 环境变量（OPENCODE_PID 是所有对话共享的
-    server 进程），且 export 不跨 bash 调用保持；唯一“稳定且每对话唯一”的是对话
-    工作目录 `.../chats/<date>/session-<id>`。命令若先 `cd`，该目录会出现在
-    OLDPWD（每次 bash 调用都从对话目录启动），故 PWD/OLDPWD/当前目录都扫一遍。
-    """
-    if not (os.environ.get('OPENCODE') or os.environ.get('AGENT')):
-        return None
-    cands = [os.environ.get('PWD'), os.environ.get('OLDPWD'), os.getcwd()]
-    cands.extend(os.environ.values())  # 兜底：环境里任何含对话目录的值
-    for cand in cands:
-        m = _OPENCODE_SESSION_RE.search(cand or '')
-        if m:
-            return m.group(1)[:12]
-    return None
-
-
 def _resolve_session_id() -> Optional[str]:
-    """会话标识：显式 HMUITEST_SESSION_ID 优先，其次自动推断 opencode 对话。
-
-    HMUITEST_SESSION_ID 取 0/off/false/no/none/- 或空串表示关闭（不按会话隔离）。
+    """会话标识：单一实现委托 device_lock.resolve_session_id（勿再各写一份，
+    两副本会失步）。HMUITEST_SESSION_ID 取 0/off/false/no/none/- 或空串返回
+    None（不按会话隔离）；其余返回稳定会话 id（opencode 对话目录推断
+    agent-xxx / cwd 短哈希兜底，跨命令稳定可作目录名）。
     """
-    raw = os.environ.get('HMUITEST_SESSION_ID')
-    if raw is not None:
-        raw = raw.strip()
-        if not raw or raw.lower() in _SESSION_OFF:
-            return None
-        return raw
-    return _opencode_session_id()
+    from utils.device_lock import resolve_session_id
+    return resolve_session_id()
 
 
 def resolve_history_dir(history_dir: Optional[str] = None,
@@ -1220,7 +1050,11 @@ class AutoDiffManager:
 
     def save_history(self, widgets: List[Dict], route: Optional[List[str]] = None):
         try:
-            data = {'timestamp': datetime.now().isoformat(), 'widgets': widgets}
+            # 剔除 compare 写入的私有键（_index/_overlay_coverage 等），
+            # 避免污染历史基准 JSON（下次 load 后混入分析数据）
+            clean = [{k: v for k, v in w.items() if not k.startswith('_')}
+                     for w in widgets]
+            data = {'timestamp': datetime.now().isoformat(), 'widgets': clean}
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             if route is not None:
@@ -1239,9 +1073,3 @@ class AutoDiffManager:
                 return data.get('route')
         except Exception:
             return None
-
-    def clear_history(self):
-        if os.path.exists(self.history_file):
-            os.unlink(self.history_file)
-        if os.path.exists(self.route_history_file):
-            os.unlink(self.route_history_file)

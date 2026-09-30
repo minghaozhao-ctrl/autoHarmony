@@ -1,8 +1,9 @@
 ---
 name: autoharmony
 description: >-
-  HarmonyOS UI 自动化测试工具链：UI 操作（点击/滑动/输入/返回）、断言验证、
-  控件树分析/diff、崩溃检测、批量脚本执行、操作录制，全部命令支持 --json
+  HarmonyOS UI 自动化测试工具链：应用桥接导航（TcpBridge 直连 App）、
+  UI 操作（点击/滑动/输入/返回）、断言验证、控件树分析/diff、崩溃检测、
+  hilog/故障日志抓取、批量脚本执行、操作录制，全部命令支持 --json
   结构化输出供 AI Agent 消费。Use when 需要执行 HarmonyOS UI 自动化测试、
   功能验收、页面状态验证、跑回归脚本、生成/录制可复用测试脚本 时。
 license: MIT
@@ -16,6 +17,7 @@ metadata:
 # autoharmony
 
 统一 CLI 入口 `autoharmony.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
+子命令：`app`（桥接导航/登录/设备查询）、`aa`（Deep Link）、`ui`（操作+断言+截图/snapshot）、`tree`（控件树搜索/diff）、`script`（批量脚本 run + 操作录制回放 record）、`device`（跨会话设备占用）、`log`（日志抓取）。
 所有命令退出码 0/1/2（0=通过，1=失败，2=用法错误），追加 `--json` 输出结构化 verdict 供 agent 解析。
 
 > 交互流程：每次 `ui` 操作后先读 `ACTION_VERDICT` 与差异报告再执行下一步，
@@ -26,19 +28,29 @@ metadata:
 ```bash
 UITEST="autoharmony.py"
 
-# Deep Link 启动应用（--bundle 必填）
+# 桥接导航到目标页面（TcpBridge 直连 App）
+python3 $UITEST app navigate "MainPage"
+
+# Deep Link 启动应用（--bundle 可选，缺省用 HMUITEST_BUNDLE/默认包名）
 python3 $UITEST aa start "myapp://page" --bundle com.example.app
 
 # 语义化点击 + 断言路由变化
 python3 $UITEST ui click-by-text "设置" --expect-route "SettingsPage"
+
+# 抓 hilog / 崩溃堆栈
+python3 $UITEST log grab --bundle com.cmcc.DigitalHome --tail 2000
+python3 $UITEST log grab --fault
 
 # Agent 模式：结构化输出
 python3 $UITEST ui click-by-text "设置" --json
 ```
 
 设备检测：自动走 env `HARMONY_DEVICE_ID` → session → `hdc list targets`，可 `--device <ID>` 指定。
+目标包名：env `HMUITEST_BUNDLE` 可覆盖（默认见 `utils/bundle.py`），带 `--bundle` 的命令以显式参数优先。
+app 桥接：`app` 命令需实现应用语义方法（`bridge/app_bridge.py` 契约），通过 env `HMUITEST_BRIDGE_CLASS=module:Class` 注入；缺失时干净报 `ACTION_VERDICT: ERROR | reason=bridge_methods_missing`（模板见 `bridge/bridge_template.py`）。
 多会话共享同一台设备时自动加占用锁：`device status` 查看、`device release [--stale|--all]` 释放；
 冲突可 `--device-wait <秒>` 等待或 `--device-takeover` 抢占，`--no-device-lock` / env `HMUITEST_DEVICE_LOCK=off` 关闭。
+`ui click` 的快速注入用 `--uinput`（uinput 直连触摸）；全局 `--fast` 是静默模式，二者不同，勿混用。
 
 ## 核心工作流
 
@@ -66,10 +78,15 @@ python3 $UITEST script run regression.json --json
 | 状态 | 含义 | 应对 |
 |------|------|------|
 | `SUCCESS` | 操作+断言通过 | 继续下一步 |
+| `CLICK_ON_DISABLED` | 点击命中禁用控件（未执行点击） | 确认是否锁定/加载态，勿盲目重试 |
 | `BLOCKED_BY_DIALOG` | 弹窗挡住 | `ui dismiss-dialogs` 后重试一次 |
-| `CRASHED` / `RESTARTED` | 进程崩溃 | 重启应用后重试 |
-| `NO_CHANGE` | UI 无变化 | `tree dump` 复核（`--expect-no-change` 时是预期，继续） |
-| `BACK_INEFFECTIVE` | 返回无效 | 改用目标页导航 |
+| `BACK_INEFFECTIVE` | 返回无效（已在栈底/被拦截/已退出） | 改用目标页导航（`app navigate`） |
+| `PENDING_DIALOG` | 有变化但弹窗仍悬停（可能只点到弹窗内元素） | `ui dismiss-dialogs` 处理弹窗后复核结果是否真正生效 |
+| `BRIDGE_UNREACHABLE` | App 桥接不可达 | `app restart` 恢复 / `aa start` 拉起 / 等 3s 重试 |
+| `CRASHED` / `RESTARTED` | 进程崩溃/内部重启 | `app restart <目标页>`（位置参数，可选重导航）后重试 |
+| `NO_CHANGE` | UI 无变化 | 解析操作后输出的 `📄 控件树 JSON:` 复核（`--expect-no-change` 时是预期，继续） |
+| `ERROR` | 动作执行异常/前置失败（如未检测到设备） | 按 reason 定位（设备未连接/操作异常），修复后重试 |
+| `DEVICE_IN_USE` / `PRECONDITION_FAILED`（script run） | 设备被占用 / 前置状态不匹配且恢复失败 | 等释放或 `device release`；按 reason 手动就绪后重跑 |
 
 ## Examples
 
@@ -81,7 +98,7 @@ python3 $UITEST script run regression.json --json
 
 | 问题 | 处理 |
 |------|------|
-| 操作全失败且 verdict 为 `NO_CHANGE` | `tree dump --overview` 看页面真实状态，确认目标文本/坐标是否变化 |
+| 操作全失败且 verdict 为 `NO_CHANGE` | 直接解析操作后输出的 `📄 控件树 JSON:` 路径看真实状态；或 `tree dump` + `tree show <file> --type/--text` 搜索确认目标文本/坐标是否变化 |
 | `ui click-by-text` 点错（多匹配） | 追加 `--index N`，或改用 `click-by-id` |
 | 图像按钮点不到 | `ui find --type Image` 查 key/id，优先 `click-by-id`，避免坐标 |
 | 脚本某步失败 | 详见 `docs/AGENT_GUIDE.md` 的"自愈脚本"章节 |
@@ -90,6 +107,8 @@ python3 $UITEST script run regression.json --json
 
 按需读取，读哪个由当前任务决定：
 
-- **命令大全与参数**（需要精确命令/参数/断言选项时）→ [docs/USAGE.md](docs/USAGE.md)
+- **命令大全与参数**（需要精确命令/参数/断言选项时）→ [docs/REFERENCE.md](docs/REFERENCE.md)
+- **完整工作流与示例**（subagent 探索流程、pytest 用例）→ [docs/EXAMPLES.md](docs/EXAMPLES.md)
+- **速查 Usage**（英文命令速查）→ [docs/USAGE.md](docs/USAGE.md)
 - **AI Agent 集成**（写 agent 工具定义、解析 verdict、错误恢复时）→ [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
 - **Bridge 扩展**（需要和 App 通信、自定义业务方法时）→ [docs/BRIDGE.md](docs/BRIDGE.md)
