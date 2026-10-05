@@ -128,7 +128,7 @@ def check_expectations_with_polling(expectations: dict,
     Returns:
         是否全部通过
     """
-    from assertions import AssertionChecker
+    from engines.assertions import AssertionChecker
 
     # timeout 容错（脚本字段笔误传字符串时结构化失败而非 TypeError）
     try:
