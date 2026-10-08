@@ -17,7 +17,8 @@ metadata:
 # autoharmony
 
 统一 CLI 入口 `autoharmony.py`，一条命令完成 UI 操作 + 自动差异报告 + 断言。
-子命令：`app`（桥接导航/登录/设备查询）、`aa`（Deep Link）、`ui`（操作+断言+截图/snapshot）、`tree`（控件树搜索/diff）、`script`（批量脚本 run + 操作录制回放 record）、`device`（跨会话设备占用）、`log`（日志抓取）。
+子命令：`app`（桥接导航/登录/设备查询；`wakeup` 唤醒屏幕可选 `--unlock` 上滑解锁）、`aa`（Deep Link）、`ui`（操作+断言+截图/snapshot；`collect` 滚动收集去重计数）、`tree`（控件树搜索/diff）、`script`（批量脚本 run + 操作录制回放 record）、`device`（跨会话设备占用）、`log`（日志抓取）。
+所有 ui/tree 命令执行前自动检测熄屏（State=0 自动唤醒+上滑解锁，5s TTL 缓存）；`screenshot` 全黑自动诊断（登录页禁止截屏 FLAG_SECURE vs 息屏）；登录已登录账号会拒绝（`already_logged_in`）。
 所有命令退出码 0/1/2（0=通过，1=失败，2=用法错误），追加 `--json` 输出结构化 verdict 供 agent 解析。
 
 > 交互流程：每次 `ui` 操作后先读 `ACTION_VERDICT` 与差异报告再执行下一步，

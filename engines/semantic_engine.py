@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 import time
-from typing import Optional
+from typing import List, Optional
 
 from analyzers.widget_tree import WidgetTreeAnalyzer
 from engines.diff_engine import WidgetTreeDiff, AutoDiffManager, ChangeReport
@@ -981,9 +981,56 @@ class SemanticEngine(HdcUITestEngine):
         _semantic_fail_verdict(f"widget_not_found: {text}")
         return False
 
+    def collect_texts(self, regex: str, max_swipes: int = 6,
+                      settle_interval: float = 1.0) -> List[str]:
+        """滚动收集去重计数：数列表项数类验证的固化（如 AI 事件 18 开关 vs 副标题 /16）。
+
+        1. 当前屏 dump，提取所有匹配 regex 的 text/hint 文本（去重保序；
+           hint-only 控件如无 text 的输入框同样收集）
+        2. 复用 _adaptive_scroll 滚动（内容签名验证真实位移，不可滚区域不误判）
+        3. 列表到底（moved=False）或连续 2 屏无新增即停，返回去重列表（调用方输出计数）
+        """
+        import re
+        import time
+        pattern = re.compile(regex)
+        collected: List[str] = []
+        seen = set()
+        working_region = None
+        stale_rounds = 0
+        for i in range(max_swipes + 1):
+            a = self._dump_and_load("collect")
+            if a:
+                for w in a.widgets:
+                    t = (w.get('text') or '').strip()
+                    if not t:
+                        # text 为空时兜底匹配 hint（hint-only 控件漏采会导致计数偏少）
+                        t = (w.get('hint') or '').strip()
+                    if not t or pattern.search(t) is None:
+                        continue
+                    if t not in seen:
+                        seen.add(t)
+                        collected.append(t)
+                a.cleanup()
+            if i >= max_swipes:
+                break
+            before = len(collected)
+            moved, _sig, working_region = self._adaptive_scroll(
+                working_region, settle_interval)
+            if len(collected) == before:
+                stale_rounds += 1
+                if stale_rounds >= 2:
+                    break
+            else:
+                stale_rounds = 0
+            if not moved:
+                break
+            time.sleep(settle_interval)
+        return collected
+
     def screenshot(self, save_path: str) -> bool:
         import subprocess
         import os
+        from utils.common import is_dark_image
         # 纯 hdc screenCap + recv（约 0.6s）
         device_path = '/data/local/tmp/_screenshot_tmp.png'
         cmd = ['hdc']
@@ -998,8 +1045,28 @@ class SemanticEngine(HdcUITestEngine):
                 # 复用固定远端临时文件（下次 screenCap 覆盖），省去一次 rm 调用（~0.3s）
                 if r2.returncode == 0 and os.path.exists(save_path) \
                         and os.path.getsize(save_path) > 0:
-                    print(f"✅ 截图已保存: {save_path}")
-                    return True
+                    # 全黑检测：熄屏（黑帧）则静默唤醒+解锁后自动重截一次；
+                    # 登录页等 FLAG_SECURE 页面的黑图是预期，唤醒无效，仍黑
+                    # 时由调用方走 _diagnose_dark_screenshot 提示
+                    if is_dark_image(save_path) and self._ensure_awake():
+                        r3 = subprocess.run(cmd + ['shell', 'uitest', 'screenCap', '-p', device_path],
+                                            capture_output=True, text=True, timeout=30)
+                        if r3.returncode == 0:
+                            r4 = subprocess.run(cmd + ['file', 'recv', device_path, save_path],
+                                                capture_output=True, text=True, timeout=30)
+                            # recv 失败时旧黑图仍在：不能当成功返回过期黑图，
+                            # 降级走下方失败分支
+                            if r4.returncode != 0:
+                                print(f"❌ 重截后拉取失败: {r4.stderr or r4.stdout}")
+                                return False
+                        # 重截后再验一次：仍黑说明是 FLAG_SECURE 页面或唤醒无效，
+                        # 保留黑图走调用方诊断；不再黑说明重截成功
+                        if is_dark_image(save_path):
+                            print("⚠️ 重截后仍为全黑（可能禁止截屏页面），"
+                                  "请结合 DIAGNOSE 判断")
+                    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                        print(f"✅ 截图已保存: {save_path}")
+                        return True
                 print(f"❌ 拉取截图失败: {r2.stderr or r2.stdout}")
             else:
                 print(f"❌ 截图失败: {r1.stderr or r1.stdout}")

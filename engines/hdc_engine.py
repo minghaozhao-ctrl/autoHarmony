@@ -3,6 +3,7 @@
 """HdcUITestEngine：基于 hdc shell uitest 的坐标操作引擎（自动差异比较）"""
 import os
 import shlex
+import subprocess
 import time
 import tempfile
 from typing import List, Optional
@@ -40,6 +41,8 @@ class HdcUITestEngine:
         # 待裁决的点击坐标（_execute_hdc_and_compare 设置；pipeline 读取后清除，
         # 用于 CLICK_ON_DISABLED 禁用预检与 NO_CHANGE 目标提示）
         self._pending_point: Optional[tuple] = None
+        # 上次熄屏检测时间（前置静默唤醒的 TTL 缓存：5s 内连续操作不重复检测）
+        self._last_awake_check: float = 0.0
 
     def close(self):
         """兼容接口：纯 hdc 引擎无常驻连接需要释放（保留以兼容既有调用点）。"""
@@ -101,15 +104,117 @@ class HdcUITestEngine:
         _record_page_path(analyzer, self.device)
         return analyzer
 
+    def _ensure_awake(self, unlock: bool = True) -> bool:
+        """熄屏时静默唤醒+上滑解锁（供 dump 失败/截图全黑时自恢复）。
+
+        检测用 hidumper -s 3308 的 State 字段（实测枚举：0=熄屏 2=亮屏）。
+        仅在熄屏（State=0）时才唤醒+上滑：此时设备必在锁屏界面，上滑不会
+        误触应用（应用内白屏/加载中等 dump 空场景 State=2，不触发，零误操作）。
+        上滑坐标用垂直滑动（x 在屏幕内即可），对多数设备通用。
+
+        唤醒后用 `power-shell timeout -o 60000` 覆盖自动熄屏时间 60s
+        （官方语义：601/602 是省电/性能模式，非常亮；timeout 会在 60s 后
+        自动恢复系统设置，不残留电源模式，不污染后续性能测试）。
+
+        ⚠️ 已知风险（实测）：无密码锁屏解锁后，滑动手势/惯性可能传递到应用，
+        引发页面变化（实测从设备主页被带到「添加设备页」）。自动解锁本身就
+        会改变页面状态，依赖页面状态的断言应在唤醒后重新确认页面，或改用
+        `app restart <目标页>` 恢复到确定状态。
+
+        Args:
+            unlock: True=唤醒后上滑解锁；False=仅亮屏+防熄屏（不上滑，
+                供 `app wakeup`（不带 --unlock）复用，避免亮屏盲滑误触应用）。
+
+        Returns:
+            True=执行了唤醒（调用方应重试刚才失败的操作）；False=亮屏，不干预。
+        """
+        import re as _re
+        import time as _time
+        cmd = ['hdc']
+        if self.device:
+            cmd += ['-t', self.device]
+        try:
+            r = subprocess.run(cmd + ['shell', 'hidumper', '-s', '3308'],
+                               capture_output=True, text=True, timeout=10)
+            m = _re.search(r'State=(\d+)', r.stdout or '')
+            if not m or m.group(1) != '0':
+                return False
+        except Exception:
+            return False
+        woke = False
+        # 各条命令独立执行（一条失败不影响后续），按实际结果返回
+        try:
+            subprocess.run(cmd + ['shell', 'power-shell', 'wakeup'],
+                           capture_output=True, timeout=10)
+            woke = True
+        except Exception:
+            pass
+        _time.sleep(0.5)
+        if unlock:
+            # 熄屏唤醒后停在锁屏界面，上滑进入（有密码锁则停在密码页，至少已亮屏）。
+            # 滑动距离取短（600px）：解锁只需 ~300-500px，长滑惯性更大，
+            # 实测解锁后手势/惯性传递到应用会误触页面（曾误开相机预览页）
+            try:
+                subprocess.run(cmd + ['shell', 'uitest', 'uiInput', 'swipe',
+                                      '400', '1800', '400', '1200', '300'],
+                               capture_output=True, timeout=10)
+            except Exception:
+                pass
+            _time.sleep(1.0)  # 等解锁动画完成、手势被系统消费完，再返回调用方
+        try:
+            # 覆盖自动熄屏时间 60s（系统会在 60s 后自动恢复原设置，无残留）
+            subprocess.run(cmd + ['shell', 'power-shell', 'timeout', '-o', '60000'],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        if woke:
+            print("⚠️ 检测到熄屏，已自动唤醒"
+                  + ("并上滑解锁" if unlock else ""))
+        return woke
+
+    def _ensure_awake_for_input(self) -> None:
+        """触摸/读屏命令的前置静默唤醒（检测是否熄屏，锁了就唤醒+上滑）。
+
+        失败后恢复链路（dump 失败/空树/截图全黑 → _ensure_awake）覆盖不到
+        「熄屏但 dump 仍成功」的场景（实测熄屏时 App UI 树大多还在），此时
+        uiInput 注入（点击/输入）会静默丢失。所有经 _dump_and_load 的命令
+        （find/click/input/collect/tree dump）执行前检测：State=0 则唤醒+解锁。
+        5s TTL 缓存避免连续操作每次都 hidumper 检测（首次 +~0.3s，后续零开销）。
+        """
+        now = time.time()
+        if now - self._last_awake_check < 5:
+            return
+        self._last_awake_check = now
+        if self._ensure_awake():
+            # 唤醒成功后刷新时间戳：_ensure_awake 含 ~2s sleep，
+            # 从唤醒完成起算 5s 免检测窗口（否则名义 5s 实际打折）
+            self._last_awake_check = time.time()
+            time.sleep(0.5)  # 唤醒+解锁后等界面稳定再执行命令
+
     def _dump_and_load(self, tag: str = "layout") -> Optional[WidgetTreeAnalyzer]:
         """从设备获取控件树并加载（含完整性校验）
 
         控件树节点数相对上次骤降（<50%）时视为疑似不完整 dump（实测同页面
         曾偶发 141→63 节点），自动重试一次并取更完整的结果。
+        入口前置静默唤醒：熄屏（State=0）时先唤醒+解锁再 dump——熄屏下
+        dump 多数仍成功但点击/输入注入无效，前置唤醒保证后续命令真正生效。
+        dump 失败时若设备熄屏（State=0），静默唤醒+解锁后重试一次——
+        亮屏时零开销（不触发 hidumper 查询）。
+        实测坑：锁屏时 dump 也能“成功”但 widgets 为空（锁屏 JSON 0 节点），
+        空树同样触发熄屏恢复；应用内白屏等空树场景 State=2 亮屏，
+        _ensure_awake 不干预，保持原行为（不误滚动页面）。
         """
+        self._ensure_awake_for_input()
         analyzer = self._dump_once(tag)
+        if analyzer is not None and not analyzer.widgets:
+            if self._ensure_awake():
+                analyzer.cleanup()
+                analyzer = self._dump_once(tag + "_awake")
         if analyzer is None:
-            return None
+            if self._ensure_awake():
+                analyzer = self._dump_once(tag + "_awake")
+            if analyzer is None:
+                return None
         cnt = len(analyzer.widgets)
         prev = getattr(self, '_last_dump_count', 0)
         if prev >= 30 and cnt < prev * 0.5:

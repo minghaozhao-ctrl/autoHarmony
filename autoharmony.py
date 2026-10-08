@@ -583,9 +583,34 @@ def cmd_app_restart(args):
             bridge.close()
 
 
+def _is_logged_in(info: object) -> bool:
+    """登录态判定：getUserInfo 返回 dict 且 success=true 或有用户标识字段。"""
+    if not isinstance(info, dict):
+        return False
+    if info.get('success') is True:
+        return True
+    return bool(info.get('mobileNumber') or info.get('passId') or info.get('sessionId'))
+
+
 def cmd_app_login(args):
     _, bridge = _make_bridge(args)
     try:
+        # 预检查：已登录则拒绝（热切换账号会让 App 设备缓存脏读，页面状态错乱）
+        try:
+            info = bridge.get_user_info()
+        except (ConnectionError, TimeoutError) as ex:
+            # 桥接不可达：明确失败，不静默登录
+            _bridge_unreachable_exit(args, ex)
+            return
+        except Exception:
+            # 业务层拒绝（可能未登录以 error 返回）：视为未知登录态，放行登录
+            info = None
+        if _is_logged_in(info):
+            current = info.get('mobileNumber') or info.get('passId') or '未知'
+            print(f"❌ 当前已登录（{current}），请先执行 `app logout` 再登录其他账号")
+            print("ACTION_VERDICT: ERROR | reason=already_logged_in | "
+                  f"current={current} | suggestion=先 `app logout`；热切换账号会导致设备缓存脏读")
+            sys.exit(1)
         result = bridge.login(args.phone, args.password)
         if result.get("success"):
             print(f"✅ 登录成功: {args.phone}")
@@ -628,6 +653,27 @@ def cmd_app_route(args):
             print(f"   {i}. {r}")
     finally:
         bridge.close()
+
+
+def cmd_app_wakeup(args):
+    """唤醒屏幕，可选上滑解锁（复用引擎 _ensure_awake，含熄屏状态检查）。
+
+    用于息屏后截图全黑/控件树为空的场景；登录页等 FLAG_SECURE 页面
+    禁止截屏导致的黑图不是息屏，唤醒无效（screenshot 会自动诊断提示）。
+    仅熄屏（State=0）时才执行唤醒序列：亮屏时提示无需唤醒、不盲滑
+    （避免在应用页面内触发滚动/跳转）。唤醒后覆盖自动熄屏时间 60s。
+    """
+    from engines.hdc_engine import HdcUITestEngine
+    device = _detect_device(args.device)
+    engine = HdcUITestEngine(device=device)
+    try:
+        if engine._ensure_awake(unlock=args.unlock):
+            print("✅ 屏幕已唤醒（60s 内不自动熄屏）"
+                  + ("，已尝试上滑解锁" if args.unlock else ""))
+        else:
+            print("✅ 屏幕已亮，无需唤醒")
+    finally:
+        engine.close()
 
 
 def _clean_device_name(name):
@@ -995,10 +1041,47 @@ def cmd_ui_swipe_direction(args):
 
 # ==================== ui subcommands (check/screenshot, no history) ====================
 
+def _diagnose_dark_screenshot(device, path):
+    """截图全黑时的自诊断：区分「登录页禁止截屏(FLAG_SECURE)」与「息屏」。
+
+    引擎层 screenshot 已对全黑做过一次「熄屏→唤醒+解锁→重截」自恢复，
+    走到这里说明重截后仍黑：登录页禁止截屏时黑图是预期（系统 FLAG_SECURE），
+    唤醒屏幕无用，应改用 tree dump / app route 获取页面信息；息屏则建议 app wakeup。
+    """
+    from utils.common import is_dark_image
+    if not is_dark_image(path):
+        return
+    route_top = None
+    try:
+        from bridge.tcp_bridge import TcpBridge
+        bridge = TcpBridge(device=device, timeout=5)
+        try:
+            route = bridge.get_current_route()
+            if route:
+                route_top = route[-1]
+        finally:
+            bridge.close()
+    except Exception:
+        pass
+    if route_top == 'LoginPage':
+        print("⚠️  截图全黑：当前在 LoginPage，登录页禁止截屏（FLAG_SECURE），"
+              "黑图是预期行为")
+        print("DIAGNOSE: login_page_no_capture | "
+              "suggestion=改用 tree dump / app route 获取页面信息，无需唤醒屏幕")
+    else:
+        print("⚠️  截图全黑：可能息屏或禁止截屏页面"
+              f"（当前路由栈顶: {route_top or '未知'}）")
+        print("DIAGNOSE: dark_screenshot | "
+              "suggestion=先 `app wakeup` 唤醒屏幕重试；"
+              "若在登录页/安全页则黑图为预期（禁止截屏），改用 tree dump")
+
+
 def cmd_ui_screenshot(args):
     engine = _semantic_engine(args)
     ok = engine.screenshot(args.path)
     _close_engine(engine)
+    if ok:
+        _diagnose_dark_screenshot(_detect_device(args.device), args.path)
     sys.exit(0 if ok else 1)
 
 
@@ -1098,6 +1181,31 @@ def cmd_ui_scroll_find(args):
     _emit_json(verdict, args)
     _close_engine(engine)
     sys.exit(0 if ok else 1)
+
+
+def cmd_ui_collect(args):
+    """滚动收集去重计数：数列表项数类验证（如 AI 事件 18 开关 vs 副标题 /16）"""
+    import re as _re
+    try:
+        _re.compile(args.regex)
+    except _re.error as e:
+        print(f"❌ 非法正则表达式 '{args.regex}': {e}")
+        print("ACTION_VERDICT: ERROR | reason=invalid_regex | "
+              "suggestion=检查 regex 语法（如转义特殊字符）")
+        sys.exit(2)
+    engine = _semantic_engine(args)
+    items = engine.collect_texts(args.regex, max_swipes=args.swipes)
+    _close_engine(engine)
+    if not items:
+        print(f"❌ 未收集到匹配 '{args.regex}' 的文本")
+        print("ACTION_VERDICT: FAILED | reason=collect_empty | "
+              "suggestion=检查 regex 是否匹配页面文本，或确认列表非空")
+        sys.exit(1)
+    print(f"✅ 收集到 {len(items)} 项（滚动 {args.swipes} 屏内去重）:")
+    for i, t in enumerate(items, 1):
+        print(f"   {i}. {t}")
+    print(f"COLLECT_RESULT: count={len(items)}")
+    sys.exit(0)
 
 
 def cmd_ui_dismiss_dialogs(args):
@@ -1573,6 +1681,11 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_app_route)
 
+    p = app_sub.add_parser('wakeup', help='唤醒屏幕（wakeup+常亮，可选 --unlock 上滑解锁）')
+    p.add_argument('--unlock', action='store_true', help='唤醒后尝试上滑解锁')
+    _add_device_arg(p)
+    p.set_defaults(func=cmd_app_wakeup)
+
     p = app_sub.add_parser('devices', help='查询设备列表（支持过滤组合）')
     p.add_argument('--category', default=None,
                    help='设备大类：all 所有(默认) / security 安防 / iot IoT')
@@ -1838,6 +1951,12 @@ def build_parser():
     p.add_argument('--swipes', type=int, default=8, help='Max scroll pages (default 8)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_scroll_find)
+
+    p = ui_sub.add_parser('collect', help='滚动收集去重计数（数列表项数类验证）')
+    p.add_argument('--regex', required=True, help='文本匹配正则（text/hint）')
+    p.add_argument('--swipes', type=int, default=6, help='最大滚动屏数（默认 6）')
+    _add_device_arg(p)
+    p.set_defaults(func=cmd_ui_collect)
 
     p = ui_sub.add_parser('dismiss-dialogs', help='Dismiss overlay dialogs')
     p.add_argument('--rounds', type=int, default=3, help='Max dismiss rounds (default 3)')
