@@ -1,0 +1,145 @@
+engines/semantic_engine.py
+  4b3611fb3f5157b5 1033
+engines/hdc_engine.py
+  4b3611fb3f5157b5 6,44-45,107-193,199-205,207,209-212,214-217
+SKILL.md
+  4b3611fb3f5157b5 20-21
+autoharmony.py
+  4b3611fb3f5157b5 666,1051,1056
+utils/common.py
+  4b3611fb3f5157b5 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.9",
+  "base_commit_sha": "ef22c6d7a83b523efabe97f15521a4832b34106d",
+  "prompts": {
+    "13a5498ae2030f40": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f5185533effedqDt4FfmEYiHH7",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 12,
+      "overriden_lines": 0
+    },
+    "209f9a7ccd57e916": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4da7e1d8ffe5vb7ukUBQqit15",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "4b3611fb3f5157b5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f15a2741fffePJJJ03cO3mk0cy",
+        "model": "opencode-go/deepseek-v4.1-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 113,
+      "total_deletions": 7,
+      "accepted_lines": 114,
+      "overriden_lines": 0
+    },
+    "5d17c93731f225be": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f9a2100aeffeCDfhvHExfMzOli",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 405,
+    "git_diff_deleted_lines": 6,
+    "ai_additions": 113,
+    "ai_accepted": 113,
+    "BYMC": 287,
+    "mixed_additions": 0,
+    "BYAC": 113,
+    "BYRC": 0,
+    "per_file": {
+      "SKILL.md": {
+        "BYMC": [],
+        "BYAC": [
+          "20-21"
+        ],
+        "BYRC": []
+      },
+      "autoharmony.py": {
+        "BYMC": [
+          "586-594",
+          "598-613",
+          "658-665",
+          "667-676",
+          "1044-1050",
+          "1052-1055",
+          "1057-1078",
+          "1083-1084",
+          "1186-1208",
+          "1684-1688",
+          "1955-1959"
+        ],
+        "BYAC": [
+          "666",
+          "1051",
+          "1056"
+        ],
+        "BYRC": []
+      },
+      "engines/hdc_engine.py": {
+        "BYMC": [],
+        "BYAC": [
+          "6",
+          "44-45",
+          "107-193",
+          "199-205",
+          "207",
+          "209-212",
+          "214-217"
+        ],
+        "BYRC": []
+      },
+      "engines/semantic_engine.py": {
+        "BYMC": [
+          "8",
+          "984-1029",
+          "1048-1069"
+        ],
+        "BYAC": [
+          "1033"
+        ],
+        "BYRC": []
+      },
+      "utils/common.py": {
+        "BYMC": [
+          "32-138"
+        ],
+        "BYAC": [
+          "4"
+        ],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1791446322,
+  "requirement_id": "UNIAPP-109652"
+}
