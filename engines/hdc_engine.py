@@ -110,11 +110,13 @@ class HdcUITestEngine:
         检测用 hidumper -s 3308 的 State 字段（实测枚举：0=熄屏 2=亮屏）。
         仅在熄屏（State=0）时才唤醒+上滑：此时设备必在锁屏界面，上滑不会
         误触应用（应用内白屏/加载中等 dump 空场景 State=2，不触发，零误操作）。
-        上滑坐标用垂直滑动（x 在屏幕内即可），对多数设备通用。
+        上滑坐标用垂直滑动（x=400 对多数宽度 ≥720 的设备在屏内）；
+        起点 y=1800 按 1260x2720 测试设备取值，小屏设备需按屏高调整。
 
-        唤醒后用 `power-shell timeout -o 60000` 覆盖自动熄屏时间 60s
-        （官方语义：601/602 是省电/性能模式，非常亮；timeout 会在 60s 后
-        自动恢复系统设置，不残留电源模式，不污染后续性能测试）。
+        唤醒后用 `power-shell timeout -o 60000` 把自动熄屏时间覆盖为 60s
+        （官方语义：601/602/603 是省电/性能/超级省电模式，非常亮。timeout -o
+        是设置一个临时的自动熄屏时长：60s 不操作后设备按此熄屏，随后由前置
+        唤醒链路再次唤醒形成闭环；非永久常亮，也不残留电源模式）。
 
         ⚠️ 已知风险（实测）：无密码锁屏解锁后，滑动手势/惯性可能传递到应用，
         引发页面变化（实测从设备主页被带到「添加设备页」）。自动解锁本身就
@@ -153,16 +155,20 @@ class HdcUITestEngine:
         if unlock:
             # 熄屏唤醒后停在锁屏界面，上滑进入（有密码锁则停在密码页，至少已亮屏）。
             # 滑动距离取短（600px）：解锁只需 ~300-500px，长滑惯性更大，
-            # 实测解锁后手势/惯性传递到应用会误触页面（曾误开相机预览页）
+            # 实测解锁后手势/惯性传递到应用会误触页面（曾误开相机预览页）。
+            # 用 uinput -T -m 直接注入（跳过 uitest uiInput 慢速滑动）：
+            # uiInput swipe 最后参数是 velocity（px/s）非 duration——此前传
+            # 300 即 300px/s，600px 要滑 2s（实测 2.98s）；uinput -T -m 的
+            # 最后参数才是 duration(ms)，300ms 滑完（实测 0.55s）
             try:
-                subprocess.run(cmd + ['shell', 'uitest', 'uiInput', 'swipe',
-                                      '400', '1800', '400', '1200', '300'],
-                               capture_output=True, timeout=10)
+                subprocess.run(
+                    cmd + ['shell', 'uinput -T -m 400 1800 400 1200 300'],
+                    capture_output=True, timeout=10)
             except Exception:
                 pass
             _time.sleep(1.0)  # 等解锁动画完成、手势被系统消费完，再返回调用方
         try:
-            # 覆盖自动熄屏时间 60s（系统会在 60s 后自动恢复原设置，无残留）
+            # 自动熄屏时间覆盖为 60s（60s 不操作后熄屏，前置唤醒链路再次唤醒）
             subprocess.run(cmd + ['shell', 'power-shell', 'timeout', '-o', '60000'],
                            capture_output=True, timeout=10)
         except Exception:
@@ -189,7 +195,10 @@ class HdcUITestEngine:
             # 唤醒成功后刷新时间戳：_ensure_awake 含 ~2s sleep，
             # 从唤醒完成起算 5s 免检测窗口（否则名义 5s 实际打折）
             self._last_awake_check = time.time()
-            time.sleep(0.5)  # 唤醒+解锁后等界面稳定再执行命令
+            # 实测坑：唤醒+解锁后立即 dump 会拿到过渡态树（79 节点但 text
+            # 全空——解锁动画未完成，锁屏层尚在），find/collect 误报"不存在"。
+            # _ensure_awake 内部解锁后等 1.0s，此处再加长到解锁后共 ~2.5s
+            time.sleep(1.5)  # 等解锁动画完成、界面稳定再执行命令
 
     def _dump_and_load(self, tag: str = "layout") -> Optional[WidgetTreeAnalyzer]:
         """从设备获取控件树并加载（含完整性校验）
@@ -209,9 +218,12 @@ class HdcUITestEngine:
         if analyzer is not None and not analyzer.widgets:
             if self._ensure_awake():
                 analyzer.cleanup()
+                # 唤醒+解锁后等界面稳定再重 dump（过渡态空文本树风险窗，同前置链路口径）
+                time.sleep(1.5)
                 analyzer = self._dump_once(tag + "_awake")
         if analyzer is None:
             if self._ensure_awake():
+                time.sleep(1.5)
                 analyzer = self._dump_once(tag + "_awake")
             if analyzer is None:
                 return None
@@ -247,8 +259,13 @@ class HdcUITestEngine:
         return w, h
 
     def _compare_with_history(self, analyzer: WidgetTreeAnalyzer,
-                              operation: str) -> Optional[ChangeReport]:
+                              operation: str,
+                              print_report: bool = True) -> Optional[ChangeReport]:
         """与历史比较并输出报告
+
+        Args:
+            print_report: 是否打印报告（复查场景传 False：复查报告与主报告
+                内容几乎相同，重复打印会使输出翻倍，仅保留复查结论行）
 
         Returns:
             变化报告（无历史时返回 None）
@@ -266,7 +283,7 @@ class HdcUITestEngine:
                 after_route=after_route,
                 after_analyzer=analyzer
             )
-            if not getattr(self, 'fast_mode', False):
+            if print_report and not getattr(self, 'fast_mode', False):
                 report.print()
             return report
         else:
@@ -327,6 +344,11 @@ class HdcUITestEngine:
         Returns:
             裁决+断言是否全部通过（决定 exit code）
         """
+        # skip_before=True（批量复用上一步 after-state）时不做 before-dump，
+        # 藏在 _dump_and_load 内的前置唤醒会被绕过——操作原语执行前显式
+        # 检测熄屏（TTL 缓存近零开销；skip_before 的连续序列在熄屏下整段
+        # uinput 注入会静默丢失，仅末尾校验一次，失败无中间线索）
+        self._ensure_awake_for_input()
         self._pending_point = point
 
         def action_fn():
@@ -429,11 +451,22 @@ class HdcUITestEngine:
     def swipe(self, x1: int, y1: int, x2: int, y2: int,
               operation: str = "", expectations: Optional[dict] = None,
               skip_before: bool = False, fresh_before: bool = False,
-              auto_recover: bool = True) -> bool:
-        """滑动并比较变化"""
+              auto_recover: bool = True,
+              velocity: Optional[int] = None) -> bool:
+        """滑动并比较变化
+
+        Args:
+            velocity: 滑动速度 px/s（官方语义：uiInput swipe 最后参数是
+                velocity 范围 200-40000 默认 600，非 duration）。None=不传
+                （用设备默认 600）。一屏滚动建议 1500-3000 提速，
+                过高（>4000）fling 惯性滚过头。
+        """
         desc = operation or f"滑动 ({x1},{y1}) → ({x2},{y2})"
+        ui_args = ["swipe", str(x1), str(y1), str(x2), str(y2)]
+        if velocity is not None:
+            ui_args.append(str(velocity))
         return self._execute_hdc_and_compare(
-            ["swipe", str(x1), str(y1), str(x2), str(y2)], desc, "滑动",
+            ui_args, desc, "滑动",
             expectations=expectations, skip_before=skip_before,
             fresh_before=fresh_before, auto_recover=auto_recover)
 

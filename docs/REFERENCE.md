@@ -32,6 +32,18 @@ python3 $UITEST app navigate "DevicePreferencePage" --expect-text "安全锁" --
 
 **restart 场景**：App 崩溃（`CRASHED`）/ 内部重启（`RESTARTED`）/ 需要干净状态时使用；冷启动后需重新登录态检查（`app user-info`）。
 
+**页面状态检查（自动，异常才展开）**：`app navigate` / `click-device` / `back` / `restart` / `login` / `logout` 等页面改变类命令结束后，自动 dump 一次检查页面实况，**正常时无额外输出**（导航命令保持精简），检测到异常才展开：
+
+| 检查项 | 级别 | 行为 |
+|--------|------|------|
+| 弹窗未处理 | 硬异常 | 打印弹窗摘要 + `ACTION_VERDICT: BLOCKED_BY_DIALOG`，exit 1 |
+| 页面白屏（控件数 < 6） | 硬异常 | 打印警告 + `ACTION_VERDICT: FAILED reason=white_screen`，exit 1 |
+| 会话失效（被踢到登录页） | 硬异常 | 打印警告 + `ACTION_VERDICT: FAILED reason=session_expired`，exit 1 |
+| 加载指示器 | 软提醒 | 仅打印 ⏳ 提示（不改变退出码） |
+| 页面错误文案 | 软提醒 | 仅打印 ⚠️ 提示（不改变退出码） |
+
+`--no-page-notice` 可跳过整个检查。踢线检查在 logout/restart/login/导航目标为登录页等"处于登录页是预期"的场景自动跳过，不会误报。
+
 ### 1.2 设备操作
 
 ```bash
@@ -555,9 +567,9 @@ python3 $UITEST log grab --fault --fault-n 1 -o /tmp/crash.txt   # 抓最近 1 �
 
 ```bash
 python3 $UITEST device status                # 查看当前占用（支持 --json）
-python3 $UITEST device release [--device X]  # 释放占用（--stale 清过期 / --all 全部）
 ```
 
-- 默认 `enforce` 策略：被其他活跃会话占用时等待（`--device-wait SEC`）或报错
+- **无 release 接口**：锁的目的是防互拆，提供释放会让其他会话先释放再操作、绕过防护。被占用时 AI 应**停止等待**，放弃本操作或询问用户；过期声明（心跳超 TTL，默认 180s）会被后续 claim 自动接替
+- 默认 `enforce` 策略：被其他活跃会话占用时停止并报错（`--device-wait SEC` 显式指定时才等待）
 - `off` 策略（`HMUITEST_DEVICE_LOCK=off`）= 完全关闭：不登记也不拦截
-- 环境变量：`HMUITEST_SESSION_ID`（显式会话名）/ `HMUITEST_CLAIM_TTL`（心跳过期，默认 900s）/ `HMUITEST_CLAIM_DIR`（声明目录）
+- 环境变量：`HMUITEST_SESSION_ID`（显式会话名）/ `HMUITEST_CLAIM_TTL`（心跳过期，默认 180s）/ `HMUITEST_CLAIM_DIR`（声明目录）

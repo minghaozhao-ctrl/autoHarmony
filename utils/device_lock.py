@@ -22,12 +22,12 @@ agent）解析出同一个会话 id；不同对话才是不同会话，从而做
 
 活跃性判定
 ----------
-只用 **claim 心跳 TTL**（默认 900s，可用 ``HMUITEST_CLAIM_TTL`` 调整）：心跳新于 TTL
+只用 **claim 心跳 TTL**（默认 180s，可用 ``HMUITEST_CLAIM_TTL`` 调整）：心跳新于 TTL
 视为活跃（会话持有中）；过期即成 stale，可被其他会话接替并给出提示。
 **不看 pid**：每条命令都是短进程、命令结束 pid 即死，若以 pid 存活判定活跃，则同一
 会话的下一条命令会把自己的 claim 判为 stale 而被抢走，跨命令就锁不住了。
 
-因为没有常驻进程，活跃性用 **claim 心跳 TTL** 判定（默认 900s）：心跳新于 TTL
+因为没有常驻进程，活跃性用 **claim 心跳 TTL** 判定（默认 180s）：心跳新于 TTL
 视为活跃；过期即成 stale，可被其他会话接替并给出提示。
 
 存储
@@ -41,13 +41,13 @@ agent）解析出同一个会话 id；不同对话才是不同会话，从而做
 ----------------
   HMUITEST_SESSION_ID   显式会话名；0/off/false/no/none/- 或空 → 关闭设备锁
   HMUITEST_DEVICE_LOCK  enforce(默认) | off   （off=完全关闭：不登记也不拦截）
-  HMUITEST_CLAIM_TTL    心跳过期秒数（默认 900）
+  HMUITEST_CLAIM_TTL    心跳过期秒数（默认 180，3 分钟）
   HMUITEST_CLAIM_DIR    声明目录（默认 ~/.hmuitest/device-claims）
 
 CLI
 ---
   autoharmony device status [--json]
-  autoharmony device release [--device X] [--stale] [--all] [--session S]
+  （无 release 接口：锁的目的是防互拆，被占用时停止等待；过期声明自动被接替）
 """
 
 import hashlib
@@ -61,7 +61,7 @@ from typing import Dict, List, Optional
 _DEFAULT_SUBDIR = os.path.join(".hmuitest", "device-claims")
 _OFF = {"0", "off", "false", "no", "none", "-", "disable", "disabled"}
 _SESSION_RE = re.compile(r"[/\\]session-([0-9a-fA-F][0-9a-fA-F-]{6,})")
-_DEFAULT_TTL = 900.0
+_DEFAULT_TTL = 180.0
 
 # 进程内已登记的设备（同一命令内 detect_device_id 可能被调用多次）
 _CLAIMED = set()
@@ -366,33 +366,3 @@ def list_claims() -> List[Dict]:
             "live": age < ttl,
         })
     return out
-
-
-def release(device: Optional[str] = None,
-            session: Optional[str] = None,
-            stale_only: bool = False) -> List[Dict]:
-    """释放匹配的 claim，返回被释放的记录列表。"""
-    removed: List[Dict] = []
-    d = claim_dir()
-    if not os.path.isdir(d):
-        return removed
-    now = time.time()
-    ttl = _ttl()
-    for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".json"):
-            continue
-        path = os.path.join(d, fn)
-        cur = _read(path)
-        if not cur:
-            continue
-        dev = cur.get("device") or fn[:-5]
-        if device and dev != device:
-            continue
-        if session and cur.get("session") != session:
-            continue
-        if stale_only and _age(cur, now) < ttl:
-            continue
-        _remove(path)
-        _CLAIMED.discard(dev)
-        removed.append(cur)
-    return removed

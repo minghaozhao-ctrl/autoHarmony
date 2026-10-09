@@ -84,14 +84,18 @@ class Change:
 
     def _calculate_priority(self) -> ChangePriority:
         if self.type == ChangeType.ADDED:
-            widget_type = self.widget.get('type', '').lower()
-            text = self.widget.get('text', '')
-            if widget_type in ['dialog', 'alertdialog', 'sheet', 'popup']:
+            widget_type = (self.widget.get('type') or '').lower()
+            text = self.widget.get('text') or ''
+            # 引用 OVERLAY_TYPES 单一来源（含半模态 modalpage/sheetpage 等；
+            # 硬编码 ['dialog','alertdialog','sheet','popup'] 曾漏配半模态），
+            # toast 瞬时变化不算高优先级
+            if widget_type in WidgetTreeDiff.OVERLAY_TYPES \
+                    and 'toast' not in widget_type:
                 return ChangePriority.HIGH
             if any(kw in text for kw in ['弹窗', '确认', '提示', '警告']):
                 return ChangePriority.HIGH
         if self.type == ChangeType.REMOVED:
-            text = self.widget.get('text', '')
+            text = self.widget.get('text') or ''
             if any(kw in text for kw in ['提交', '确定', '确认', '登录']):
                 return ChangePriority.HIGH
         if self.type == ChangeType.TEXT_CHANGED:
@@ -193,7 +197,12 @@ class ChangeReport:
         t = (w.get('text') or '').strip() or (w.get('hint') or '').strip()
         if t:
             return True
-        if str(w.get('checked') or '') in ('true', 'false') or w.get('selected') == 'true':
+        # 实测坑：dumpLayout 给几乎所有节点都带默认属性 checked='false'
+        # （实测 297 节点中 296 个），旧逻辑 checked in ('true','false')
+        # 会把每个结构节点（NavDestination/Stack 等）都判为「有信息量」，
+        # 整页切换时报告列出大量无文本节点。修正：仅"状态为真"或控件
+        # 本身就是状态类（其 false 值也值得报告）才算有信息量。
+        if w.get('checked') == 'true' or w.get('selected') == 'true':
             return True
         return (w.get('type') or '').lower() in (
             'toggle', 'switch', 'checkbox', 'radio', 'dialog', 'alertdialog', 'progress', 'tabbar')
@@ -241,32 +250,52 @@ class ChangeReport:
               f"文本/状态/属性{len(txt_state)} · 遮挡{len(occl)} · 解除遮挡{len(reve)} · 其它{len(other)}")
         print()
 
-        LIMIT = 8
+        # 整页/跨页切换（tab 切换、页面跳转、WebView 进出）时变化节点极多且
+        # 多为整页重建，明细列太多价值有限：压缩展示条数（文本示例保留，
+        # 供 AI 确认落在正确页面）
+        page_switch = (len(added) + len(removed)) >= 50
+        LIMIT = 4 if page_switch else 8
 
         def _label(w):
             t = (w.get('text') or '').strip() or (w.get('hint') or '').strip()
             ty = w.get('type', '')
-            mark = f" checked={w.get('checked')}" if w.get('checked') in ('true', 'false') else ''
+            # checked 仅对状态类控件显示：普通节点带默认 checked='false'
+            # （dumpLayout 特性），每个条目都显示是噪声
+            mark = ''
+            if ty.lower() in ('toggle', 'switch', 'checkbox', 'radio') \
+                    and w.get('checked') in ('true', 'false'):
+                mark = f" checked={w.get('checked')}"
             return f"{ty}{mark} {t!r}" if t else f"{ty}(无文本)"
 
         sig_add = [c for c in added if self._is_sig(c.widget)]
-        print(f"● 新增({len(added)})  →  有信息量 {len(sig_add)} 条")
-        for c in sig_add[:LIMIT]:
-            print(f"    + {_label(c.widget)}  {c.widget.get('bounds', '')}")
-        folded = len(added) - min(len(sig_add), LIMIT)
-        if folded > 0:
-            print(f"    … 另 {folded} 条纯结构/无文本")
-        print()
+        if added and not sig_add:
+            # 整页切换/导航重建的典型形态：全部为无文本结构节点
+            print(f"● 新增({len(added)})：纯结构/无文本节点（无有效信息）")
+        elif sig_add:
+            struct_add = len(added) - len(sig_add)
+            tail = f"，另 {struct_add} 条纯结构/无文本" if struct_add else ""
+            print(f"● 新增({len(added)})  →  有信息量 {len(sig_add)} 条{tail}")
+            for c in sig_add[:LIMIT]:
+                print(f"    + {_label(c.widget)}  {c.widget.get('bounds', '')}")
+            if len(sig_add) > LIMIT:
+                print(f"    … 另 {len(sig_add) - LIMIT} 条有信息量条目未显示")
+        if added:
+            print()
 
         # 消失：不给坐标
         sig_rem = [c for c in removed if self._is_sig(c.widget)]
-        print(f"● 消失({len(removed)})  →  有信息量 {len(sig_rem)} 条")
-        for c in sig_rem[:LIMIT]:
-            print(f"    - {_label(c.widget)}")
-        folded = len(removed) - min(len(sig_rem), LIMIT)
-        if folded > 0:
-            print(f"    … 另 {folded} 条纯结构/无文本")
-        print()
+        if removed and not sig_rem:
+            print(f"● 消失({len(removed)})：纯结构/无文本节点（无有效信息）")
+        elif sig_rem:
+            struct_rem = len(removed) - len(sig_rem)
+            tail = f"，另 {struct_rem} 条纯结构/无文本" if struct_rem else ""
+            print(f"● 消失({len(removed)})  →  有信息量 {len(sig_rem)} 条{tail}")
+            for c in sig_rem[:LIMIT]:
+                print(f"    - {_label(c.widget)}")
+            if len(sig_rem) > LIMIT:
+                print(f"    … 另 {len(sig_rem) - LIMIT} 条有信息量条目未显示")
+        if removed:
+            print()
 
         if pos:
             groups = defaultdict(list)
@@ -347,7 +376,11 @@ class WidgetTreeDiff:
     OVERLAY_TYPES = {
         'dialog', 'alertdialog', 'sheet', 'popup', 'menu', 'menuitem',
         'actionmenu', 'contextmenu', 'toast', 'customdialog',
-        'bottomsheet', 'sidebarm', 'toastdialog'
+        'bottomsheet', 'sidebarm', 'toastdialog',
+        # 模态页/半模态容器（ArkUI 框架生成，type 不含 dialog 子串）：
+        # 实测系统「通知管理」半模态结构为 ModalPage→UIExtensionComponent
+        # →SheetWrapper→SheetPage→…，仅按 dialog 子串匹配曾漏检
+        'modalpage', 'sheetpage', 'sheetwrapper', 'bindsheet', 'subwindow',
     }
 
     # 系统 UI 窗口 bundle（状态栏/桌面/系统设置等）。这些窗口与 App 内容无关，
@@ -358,6 +391,7 @@ class WidgetTreeDiff:
         'com.ohos.systemui',          # 系统状态栏/通知
         'com.ohos.settings',
         'com.ohos.note',
+        'com.ohos.launcher',          # 鸿蒙桌面（与 huawei 前缀对称，双前缀补齐）
         'com.huawei.hmos.sceneboard',
         'com.huawei.hmos.systemui',
         'com.huawei.hmos.launcher',
@@ -373,6 +407,9 @@ class WidgetTreeDiff:
         'relativecontainer', 'navigation', 'navigationcontent',
         'navdestination', 'navdestinationcontent', 'scroll', 'list',
         'grid', 'swiper', 'tabs', 'tabcontent', 'tabbar', 'blank',
+        # 与 LAYOUT_TYPES 对齐：waterflow（ArkUI 长列表常用）迟渲染的整屏页
+        # 曾被 branch1 误判为覆盖层；refresh 是下拉刷新容器
+        'waterflow', 'refresh',
         'line', 'nodecontainer', '__common__',
         # —— 自绘/框架整页容器（实测 rcp 设备页会抛出，非弹窗）——
         'folder', 'hover', 'controlparts', 'controlpartsgroup',
@@ -409,7 +446,7 @@ class WidgetTreeDiff:
 
     @staticmethod
     def is_overlay(widget: Dict) -> bool:
-        widget_type = widget.get('type', '').lower()
+        widget_type = (widget.get('type', '') or '').lower()
         return widget_type in WidgetTreeDiff.OVERLAY_TYPES
 
     @staticmethod
@@ -470,7 +507,7 @@ class WidgetTreeDiff:
             i for i, w in enumerate(widgets)
             if _coverage(w) < 0.5
             and _is_visible(w)
-            and (w.get('text', '').strip() or w.get('clickable') == 'true')
+            and ((w.get('text', '') or '').strip() or w.get('clickable') == 'true')
         ]
         content_orders = [widgets[i].get('render_order', 0) for i in content_widget_indices]
         min_content_order = min(content_orders) if content_orders else float('inf')
@@ -520,7 +557,7 @@ class WidgetTreeDiff:
             启发式；显式 dialog/sheet 等类型(branch2)保持原样，避免漏掉
             WebView 内真正以 dialog 类型暴露的 JS 弹窗。
             """
-            if widgets[idx].get('type', '').lower() in ('web', 'wwwview', 'webview'):
+            if (widgets[idx].get('type', '') or '').lower() in ('web', 'wwwview', 'webview'):
                 return True
             cur = widgets[idx].get('parent_index')
             seen = set()
@@ -528,7 +565,7 @@ class WidgetTreeDiff:
                 if cur < 0 or cur >= len(widgets):
                     return False
                 seen.add(cur)
-                if widgets[cur].get('type', '').lower() in ('web', 'wwwview', 'webview', 'rootwebarea'):
+                if (widgets[cur].get('type', '') or '').lower() in ('web', 'wwwview', 'webview', 'rootwebarea'):
                     return True
                 cur = widgets[cur].get('parent_index')
             return False
@@ -583,7 +620,7 @@ class WidgetTreeDiff:
         for idx, w in enumerate(widgets):
             if id(w) in picked_ids:
                 continue
-            wt = w.get('type', '').lower()
+            wt = (w.get('type', '') or '').lower()
             attrs = w.get('attributes', {})
             is_type_overlay = wt in WidgetTreeDiff.OVERLAY_TYPES
             is_modal = attrs.get('modal') == 'true' or attrs.get('isModal') == 'true'
@@ -659,16 +696,16 @@ class WidgetTreeDiff:
     @staticmethod
     def is_significant_widget(widget: Dict,
                               screen_area: Optional[int] = None) -> bool:
-        widget_type = widget.get('type', '').lower()
+        widget_type = (widget.get('type', '') or '').lower()
         if widget_type in WidgetTreeDiff.PERSONALIZED_TYPES:
             return True
         if widget_type in WidgetTreeDiff.OVERLAY_TYPES:
             return True
-        if widget.get('text', '').strip():
+        if (widget.get('text', '') or '').strip():
             return True
         if widget.get('clickable') == 'true':
             return True
-        if widget.get('description', '').strip():
+        if (widget.get('description', '') or '').strip():
             return True
         bounds = WidgetTreeDiff._parse_bounds(widget.get('bounds', ''))
         if bounds:
@@ -923,7 +960,7 @@ class WidgetTreeDiff:
         return best_match, best_score
 
     def _calculate_similarity(self, before: Dict, after: Dict) -> float:
-        if before.get('type', '').lower() != after.get('type', '').lower():
+        if (before.get('type', '') or '').lower() != (after.get('type', '') or '').lower():
             return 0.0
         # 双方都有 uniqueId 且不一致 → 必为不同节点，直接判 0，防止启发式误配
         b_uid = (before.get('attributes') or {}).get('uniqueId')

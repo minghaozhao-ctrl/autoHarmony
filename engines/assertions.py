@@ -7,6 +7,8 @@
 """
 from typing import List, Optional, Dict
 
+from engines.diff_engine import WidgetTreeDiff
+
 
 class AssertionResult:
     """单条断言结果"""
@@ -82,6 +84,10 @@ class AssertionChecker:
 
     def check_text_gone(self, text: str) -> AssertionResult:
         """检查页面是否已不存在包含指定文本的控件"""
+        if not self.widgets:
+            # 空树（dump 失败/过渡态 0 节点）时空洞通过会假报「控件已不存在」
+            return AssertionResult(
+                False, f"期望文本消失 '{text}'", "控件树为空，无法验证")
         found = [w for w in self.widgets
                  if text.lower() in (w.get('text', '') or '').lower()
                  or text.lower() in (w.get('hint', '') or '').lower()]
@@ -97,6 +103,10 @@ class AssertionChecker:
         """检查操作是否未产生变化"""
         if self.change_report is None:
             return AssertionResult(False, "期望无变化", "无差异报告可用")
+        if not self.widgets:
+            # 空树时 changes 恒空 → 空洞通过（同 check_text_gone 口径）
+            return AssertionResult(
+                False, "期望无变化", "控件树为空，无法验证")
         if self.change_report.route_changed:
             return AssertionResult(False, "期望无变化", "路由发生了变化")
         if self.change_report.changes:
@@ -157,12 +167,16 @@ class AssertionChecker:
         # 与 semantic_engine.check_dialog 同步：无 type 节点不算弹窗
         # （旧逻辑 `'' in target` 恒真，缺 type 字段节点全部误报）、
         # visible=false 不算；匹配只保留相等/包含（target in t），
-        # 去掉反向的 `t in target`（type='dialog' 会误命中 target='alertdialog'）
+        # 去掉反向的 `t in target`（type='dialog' 会误命中 target='alertdialog'）；
+        # 显式 overlay 类型（含半模态 ModalPage/SheetPage 等）也算弹窗
+        # （type 不含 dialog 子串，仅子串匹配会漏检，同 semantic_engine）
         found = [w for w in self.widgets
                  if w.get('type', '')
                  and str(w.get('visible', 'true') or 'true').lower() != 'false'
                  and (w.get('type', '').lower() == target
-                      or target in w.get('type', '').lower())]
+                      or target in w.get('type', '').lower()
+                      or ((w.get('type', '').lower()) in WidgetTreeDiff.OVERLAY_TYPES
+                          and 'toast' not in w.get('type', '').lower()))]
         if found:
             return AssertionResult(
                 True, f"期望弹窗出现 '{dialog_type}'",

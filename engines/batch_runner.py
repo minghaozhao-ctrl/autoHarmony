@@ -319,6 +319,13 @@ class BatchRunner:
         script = self._normalize_script(script)
         name = script.get('name', '未命名脚本')
         steps = script.get('steps', [])
+        if not steps:
+            # 空脚本拒绝假绿：steps 键拼错/录制清单全被过滤时跑 0 步返回
+            # all_passed=True 会造成 CI 假绿
+            print("\n❌ 脚本无有效步骤（steps 缺失/为空或全部被过滤）")
+            print("ACTION_VERDICT: ERROR | reason=empty_steps: 脚本无有效步骤")
+            return {'name': name, 'total': 0, 'passed': 0,
+                    'failed': 0, 'all_passed': False}
 
         print(f"\n{'#' * 60}")
         print(f"# 批量执行: {name} ({len(steps)} 步)")
@@ -462,6 +469,13 @@ class BatchRunner:
             print(f"❌ 未知操作类型: {action}")
             return False
 
+        # click_sequence 解析失败（坐标转换异常 → points=[]）时判步骤失败，
+        # 拒绝静默“成功”（空点序列执行 0 次点击但步骤可 pass）
+        if action == 'click_sequence' and not params.get('points'):
+            print("❌ click_sequence 步骤 points 为空（解析失败或参数缺失）")
+            print("ACTION_VERDICT: ERROR | reason=empty_points")
+            return False
+
         try:
             return dispatch[action]()
         except KeyError as ex:
@@ -536,13 +550,19 @@ class BatchRunner:
                 last_route = object()  # 哨兵：与任何列表都不相等
                 while _time.time() < deadline:
                     after_route = bridge.get_current_route()
-                    if after_route == last_route:
+                    # None（桥接瞬时超时）不参与稳定判定（同 cmd_app_back）
+                    if after_route is not None and after_route == last_route:
                         stable_route = after_route
                         break
                     last_route = after_route
                     _time.sleep(1)
                 if stable_route is None:
                     stable_route = last_route if isinstance(last_route, list) else None
+                    # deadline 命中采信的是最后一次采样（可能为过渡态瞬拍），补采一次
+                    if stable_route is not None:
+                        final = bridge.get_current_route()
+                        if final is not None:
+                            stable_route = final
 
                 if stable_route and before_route is not None \
                         and stable_route != before_route:
@@ -566,7 +586,9 @@ class BatchRunner:
                     print("❌ login 步骤缺少 params.phone")
                     print("ACTION_VERDICT: ERROR | reason=missing_params.phone")
                     return False
-                result = bridge.login(phone)
+                # password 与 CLI 路径同口径（TcpBridge.login 已支持，脚本
+                # 路径漏传会语义分叉：无密码账号静默登录失败）
+                result = bridge.login(phone, params.get('password'))
                 if not result.get('success'):
                     print(f"❌ 登录失败: {result.get('message', '未知错误')}")
                     print("ACTION_VERDICT: ERROR | reason=bridge_login_failed")

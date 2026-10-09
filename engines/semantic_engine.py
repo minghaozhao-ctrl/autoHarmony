@@ -403,7 +403,8 @@ class SemanticEngine(HdcUITestEngine):
                         expectations: Optional[dict] = None,
                         skip_before: bool = False,
                         fresh_before: bool = False,
-                        auto_recover: bool = True) -> bool:
+                        auto_recover: bool = True,
+                        velocity: Optional[int] = None) -> bool:
         desc = operation or f"向 {direction} 滑动 {distance}"
         # 纯 hdc uiInput swipe，从屏幕中心按方向滑动
         w, h = self._screen_wh()
@@ -422,7 +423,8 @@ class SemanticEngine(HdcUITestEngine):
                           expectations=expectations,
                           skip_before=skip_before,
                           fresh_before=fresh_before,
-                          auto_recover=auto_recover)
+                          auto_recover=auto_recover,
+                          velocity=velocity)
 
     def go_back(self, operation: str = "",
                 expectations: Optional[dict] = None,
@@ -452,7 +454,13 @@ class SemanticEngine(HdcUITestEngine):
                         continue
                     if str(w.get('visible', 'true') or 'true').lower() == 'false':
                         continue
-                    if t == target or target in t:
+                    if t == target or target in t \
+                            or (t in WidgetTreeDiff.OVERLAY_TYPES
+                                and 'toast' not in t):
+                        # 显式 overlay 类型（含半模态 ModalPage/SheetPage 等）
+                        # 也算弹窗：实测系统「通知管理」半模态结构为
+                        # ModalPage→UIExtensionComponent→SheetPage→…，
+                        # type 不含 dialog 子串，仅按子串匹配会漏检
                         print(f"✅ 检测到 {dialog_type} 弹窗")
                         return True
             finally:
@@ -577,8 +585,14 @@ class SemanticEngine(HdcUITestEngine):
                     cx_click = (tb[0] + tb[2]) // 2
                     cy_click = (tb[1] + tb[3]) // 2
                     print(f"ℹ️ 目标 {value} 可见，点击 ({cx_click},{cy_click})")
-                    self._hdc_cmd(["shell", "uitest", "uiInput",
-                                   "click", str(cx_click), str(cy_click)])
+                    ok, out = self._hdc_cmd(["shell", "uitest", "uiInput",
+                                             "click", str(cx_click), str(cy_click)])
+                    if not ok:
+                        print(f"❌ 点击注入失败: {out}")
+                        _semantic_fail_verdict("picker_click_failed")
+                        return False
+                    # 点击选中项后等动画稳定再进下轮 dump（过渡态会误读 cur_num）
+                    time.sleep(0.5)
                     continue
                 # 目标不可见 → 滑动（步长 ≈ 3 项，用中位项距）
                 if len(items) >= 2:
@@ -595,9 +609,14 @@ class SemanticEngine(HdcUITestEngine):
                     y1, y2 = y_lo, min(y_hi, y_lo + dist)   # 向下滑
                 print(f"ℹ️ 目标 {value} 不可见（当前 {cur_txt}），滑动列 "
                       f"({column_x},{y1})→({column_x},{y2})")
-                self._hdc_cmd(["shell", "uitest", "uiInput",
-                               "swipe", str(column_x), str(y1),
-                               str(column_x), str(y2)])
+                ok, out = self._hdc_cmd(["shell", "uitest", "uiInput",
+                                         "swipe", str(column_x), str(y1),
+                                         str(column_x), str(y2)])
+                if not ok:
+                    print(f"❌ 滑动注入失败: {out}")
+                    _semantic_fail_verdict("picker_swipe_failed")
+                    return False
+                # 滑动后等滚动稳定（其他滚动路径均有 settle，唯此处缺）
             finally:
                 analyzer.cleanup()
         print(f"❌ 超过 {max_iter} 次迭代仍未到达目标值 {value}")
@@ -707,7 +726,7 @@ class SemanticEngine(HdcUITestEngine):
         import re
         sig = []
         for w in widgets:
-            if w.get('type') != 'Text':
+            if (w.get('type') or '').lower() != 'text':
                 continue
             t = (w.get('text') or '').strip()
             if not t:
@@ -721,7 +740,8 @@ class SemanticEngine(HdcUITestEngine):
         """识别候选竖向滚动容器，返回 bounds 列表（按高度降序）。
 
         只认竖向滚动容器，排除横向 Swiper（竖滑无效且可能误触发翻页）：
-        - 类型 Scroll/List/ListItemGroup/Grid
+        - 类型 Scroll/List/ListItemGroup/Grid/WaterFlow（WaterFlow 是 ArkUI
+          长列表常用容器，漏配会导致 WaterFlow 页只能整屏兜底）
         - 宽高均 >= 80px
         高度越大越可能是主滚动区，故按高度降序。
         """
@@ -729,7 +749,7 @@ class SemanticEngine(HdcUITestEngine):
         cands, seen = [], set()
         for w in analyzer.widgets:
             t = (w.get('type') or '').lower()
-            if t not in ('scroll', 'list', 'listitemgroup', 'grid'):
+            if t not in ('scroll', 'list', 'listitemgroup', 'grid', 'waterflow'):
                 continue
             nums = re.findall(r'-?\d+', w.get('bounds', '') or '')
             if len(nums) < 4:
@@ -747,14 +767,21 @@ class SemanticEngine(HdcUITestEngine):
 
     # ---------- 底层滑动 ----------
 
-    def _do_swipe(self, x: int, y1: int, y2: int, duration: int) -> bool:
-        """执行一次 hdc uiInput swipe，返回是否成功。"""
+    def _do_swipe(self, x: int, y1: int, y2: int, velocity: int) -> bool:
+        """执行一次 hdc uiInput swipe，返回是否成功。
+
+        ⚠️ 官方语义（uitest help）：swipe 最后参数是 **velocity（px/s，
+        范围 200-40000，默认 600）**，不是 duration（ms）！此前按 duration
+        使用导致滚动极慢：一屏 ~1500px / 600px/s = 2.5s 滑动时长
+        （实测 swipe 600px/300px/s 耗时 3.1s，与小位移 50px/200px/s 0.58s
+        对比确认耗时 ∝ 距离/velocity）。
+        """
         import subprocess
         cmd = ['hdc']
         if self.device:
             cmd += ['-t', self.device]
         cmd += ['shell', 'uitest', 'uiInput', 'swipe',
-                str(x), str(y1), str(x), str(y2), str(duration)]
+                str(x), str(y1), str(x), str(y2), str(velocity)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return r.returncode == 0
@@ -762,28 +789,34 @@ class SemanticEngine(HdcUITestEngine):
             return False
 
     def _swipe_page_up_in(self, cb) -> bool:
-        """在指定容器 bounds 内上滑一屏（内容下滚）。"""
+        """在指定容器 bounds 内上滑一屏（内容下滚）。
+
+        velocity 1000：一屏 ~1500px 滑动 ~1.5s（默认 600 要 2.5s）。
+        实测权衡：1500px/s 会触发 fling 惯性滚过头（collect 2 屏滚到底部，
+        中间内容被跳过只收集到 1 项）；600px/s 精确但慢。1000 折中：
+        滚动位移可控、不过头。
+        """
         x = (cb[0] + cb[2]) // 2
         y1 = int(cb[1] + (cb[3] - cb[1]) * 0.80)
         y2 = int(cb[1] + (cb[3] - cb[1]) * 0.25)
-        return self._do_swipe(x, y1, y2, 600)
+        return self._do_swipe(x, y1, y2, 1000)
 
     def _swipe_page_up_fullscreen(self) -> bool:
         """整屏中线上滑一屏（兜底，不依赖容器识别）。"""
         w, h = self._screen_wh()
-        return self._do_swipe(w // 2, int(h * 0.80), int(h * 0.25), 600)
+        return self._do_swipe(w // 2, int(h * 0.80), int(h * 0.25), 1000)
 
     def _swipe_small_up_in(self, cb) -> bool:
         """在指定容器内小幅上滑（约 1/4 容器高），修正目标被底边截断。"""
         x = (cb[0] + cb[2]) // 2
         y1 = int(cb[1] + (cb[3] - cb[1]) * 0.78)
         y2 = int(cb[1] + (cb[3] - cb[1]) * 0.62)
-        return self._do_swipe(x, y1, y2, 400)
+        return self._do_swipe(x, y1, y2, 800)
 
     def _swipe_small_up_fullscreen(self) -> bool:
         """整屏中线小幅上滑（兜底）。"""
         w, h = self._screen_wh()
-        return self._do_swipe(w // 2, int(h * 0.78), int(h * 0.62), 400)
+        return self._do_swipe(w // 2, int(h * 0.78), int(h * 0.62), 800)
 
     # ---------- 自适应滚动 ----------
 
@@ -1051,14 +1084,17 @@ class SemanticEngine(HdcUITestEngine):
                     if is_dark_image(save_path) and self._ensure_awake():
                         r3 = subprocess.run(cmd + ['shell', 'uitest', 'screenCap', '-p', device_path],
                                             capture_output=True, text=True, timeout=30)
-                        if r3.returncode == 0:
-                            r4 = subprocess.run(cmd + ['file', 'recv', device_path, save_path],
-                                                capture_output=True, text=True, timeout=30)
-                            # recv 失败时旧黑图仍在：不能当成功返回过期黑图，
-                            # 降级走下方失败分支
-                            if r4.returncode != 0:
-                                print(f"❌ 重截后拉取失败: {r4.stderr or r4.stdout}")
-                                return False
+                        # 重截失败时旧黑图仍在：不能当成功返回过期黑图
+                        if r3.returncode != 0:
+                            print(f"❌ 唤醒后重截失败: {r3.stderr or r3.stdout}")
+                            return False
+                        r4 = subprocess.run(cmd + ['file', 'recv', device_path, save_path],
+                                            capture_output=True, text=True, timeout=30)
+                        # recv 失败时旧黑图仍在：不能当成功返回过期黑图，
+                        # 降级走下方失败分支
+                        if r4.returncode != 0:
+                            print(f"❌ 重截后拉取失败: {r4.stderr or r4.stdout}")
+                            return False
                         # 重截后再验一次：仍黑说明是 FLAG_SECURE 页面或唤醒无效，
                         # 保留黑图走调用方诊断；不再黑说明重截成功
                         if is_dark_image(save_path):

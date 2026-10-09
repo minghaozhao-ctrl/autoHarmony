@@ -42,7 +42,7 @@ def filter_to_top_page(data: Dict, bundle: Optional[str] = None) -> Dict:
         return data
     bundle = bundle or default_bundle()
     app_win = None
-    for child in data.get('children', []):
+    for child in data.get('children') or []:
         if child.get('attributes', {}).get('bundleName') == bundle:
             app_win = child
             break
@@ -55,13 +55,34 @@ def filter_to_top_page(data: Dict, bundle: Optional[str] = None) -> Dict:
         if n.get('attributes', {}).get('type') == 'NavDestination':
             navs.append((n, anc))
             anc = anc + [n]
-        for c in n.get('children', []):
+        for c in n.get('children') or []:
             collect_nav(c, anc)
 
     collect_nav(app_win, [])
     if not navs:
         return data
     target, target_anc = navs[-1]
+
+    def _nav_has_content(n) -> bool:
+        """NavDestination 子树内是否有任何非空文本"""
+        stack = [n]
+        while stack:
+            m = stack.pop()
+            if ((m.get('attributes') or {}).get('text') or '').strip():
+                return True
+            stack.extend(m.get('children') or [])
+        return False
+
+    # 实测坑：空占位 NavDestination（无任何文本）可能出现在 DFS 最后
+    # （restart 过渡页/DIALOG 包裹层，实测消息推送页树内 navs[-1] 为
+    # 0 文本空占位，navs[0]/[1] 才是页面内容）——盲选 navs[-1] 会把
+    # 有文本的页面全部剔除，find/collect 误报"控件不存在"。
+    # 从后往前回退到最后一个有内容的 NavDestination 作为栈顶。
+    if not _nav_has_content(target):
+        for n, anc in reversed(navs):
+            if _nav_has_content(n):
+                target, target_anc = n, anc
+                break
     keep_ids = {id(target)} | {id(a) for a in target_anc}
 
     owner: Dict[int, Optional[Dict]] = {}
@@ -70,7 +91,7 @@ def filter_to_top_page(data: Dict, bundle: Optional[str] = None) -> Dict:
         if n.get('attributes', {}).get('type') == 'NavDestination':
             cur = n
         owner[id(n)] = cur
-        for c in n.get('children', []):
+        for c in n.get('children') or []:
             mark(c, cur)
 
     mark(app_win, None)
@@ -82,7 +103,7 @@ def filter_to_top_page(data: Dict, bundle: Optional[str] = None) -> Dict:
         cur_owner = owner.get(id(n))
         keep = cur_owner is target or cur_owner is None
         children = []
-        for c in n.get('children', []):
+        for c in n.get('children') or []:
             r = rebuild(c)
             if r is not None:
                 children.append(r)
@@ -228,17 +249,17 @@ class WidgetTreeAnalyzer:
     def _get_filter(self, mode: Optional[str], search_param: Optional[str]):
         """返回搜索模式对应的过滤函数（非搜索模式返回 None）"""
         if mode == "type" and search_param:
-            return lambda w: w['type'].lower() == search_param.lower()
+            return lambda w: (w.get('type') or '').lower() == search_param.lower()
         if mode == "text" and search_param:
-            return lambda w: (search_param.lower() in w['text'].lower()
-                              or search_param.lower() in w['hint'].lower())
+            return lambda w: (search_param.lower() in (w.get('text') or '').lower()
+                              or search_param.lower() in (w.get('hint') or '').lower())
         if mode == "id" and search_param:
-            return lambda w: search_param.lower() in w['id'].lower()
+            return lambda w: search_param.lower() in (w.get('id') or '').lower()
         if mode == "clickable":
-            return lambda w: w['clickable'] == 'true'
+            return lambda w: w.get('clickable') == 'true'
         if mode == "input":
             input_types = ['TextInput', 'TextArea', 'TextField', 'RichEditor', 'Search']
-            return lambda w: w['type'] in input_types
+            return lambda w: (w.get('type') or '') in input_types
         return None
 
     def search_json(self, filter_fn):
@@ -249,14 +270,14 @@ class WidgetTreeAnalyzer:
             # 负坐标支持（与 _parse_center 同口径，勿再分叉）
             m = re.match(r'\((-?\d+),\s*(-?\d+)\)', w.get('center') or '')
             out.append({
-                'type': w['type'],
-                'id': w['id'],
-                'text': w['text'],
-                'hint': w['hint'],
-                'bounds': w['bounds'],
+                'type': w.get('type') or '',
+                'id': w.get('id') or '',
+                'text': w.get('text') or '',
+                'hint': w.get('hint') or '',
+                'bounds': w.get('bounds') or '',
                 'center': {'x': int(m.group(1)), 'y': int(m.group(2))} if m else None,
-                'clickable': w['clickable'],
-                'enabled': w['enabled'],
+                'clickable': w.get('clickable') or '',
+                'enabled': w.get('enabled') or '',
             })
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
@@ -357,7 +378,7 @@ class WidgetTreeAnalyzer:
         }
         self.widgets.append(widget_info)
 
-        children = node.get('children', [])
+        children = node.get('children') or []
         for child in children:
             self._parse_tree(child, depth + 1, parent_index=current_index,
                              parent_bundle=bundle)
@@ -409,29 +430,29 @@ class WidgetTreeAnalyzer:
     def search_by_type(self, widget_type: str):
         """根据类型搜索控件"""
         self._search_and_print(
-            lambda w: w['type'].lower() == widget_type.lower(),
+            lambda w: (w.get('type') or '').lower() == widget_type.lower(),
             f"搜索类型为 '{widget_type}' 的控件",
             f"未找到类型为 '{widget_type}' 的控件")
 
     def search_by_text(self, text: str):
         """根据文本搜索控件"""
         self._search_and_print(
-            lambda w: text.lower() in w['text'].lower()
-            or text.lower() in w['hint'].lower(),
+            lambda w: text.lower() in (w.get('text') or '').lower()
+            or text.lower() in (w.get('hint') or '').lower(),
             f"搜索文本包含 '{text}' 的控件",
             f"未找到文本包含 '{text}' 的控件")
 
     def search_by_id(self, widget_id: str):
         """根据ID搜索控件"""
         self._search_and_print(
-            lambda w: widget_id.lower() in w['id'].lower(),
+            lambda w: widget_id.lower() in (w.get('id') or '').lower(),
             f"搜索ID包含 '{widget_id}' 的控件",
             f"未找到ID包含 '{widget_id}' 的控件")
 
     def search_clickable(self):
         """搜索可点击的控件"""
         self._search_and_print(
-            lambda w: w['clickable'] == 'true',
+            lambda w: w.get('clickable') == 'true',
             "搜索可点击的控件",
             "未找到可点击的控件")
 
@@ -439,7 +460,7 @@ class WidgetTreeAnalyzer:
         """搜索输入框控件"""
         input_types = ['TextInput', 'TextArea', 'TextField', 'RichEditor', 'Search']
         self._search_and_print(
-            lambda w: w['type'] in input_types,
+            lambda w: (w.get('type') or '') in input_types,
             "搜索输入框控件",
             "未找到输入框控件")
     

@@ -82,11 +82,12 @@ def claim_device(device: str, quiet: bool = False):
     if not quiet:
         print(f"❌ 设备 {device} 已被会话 {outcome.owner_session} 占用"
               f"（pid={outcome.owner_pid}）")
-        print("   等待/抢占：--device-wait <秒> / --device-takeover；"
-              "查看：autoharmony device status")
+        print("   停止等待：设备被其他会话占用，放弃本操作或询问用户"
+              "（不要等待释放或反复重试）；查看：autoharmony device status")
         print(f"ACTION_VERDICT: DEVICE_IN_USE | "
               f"reason=held by session {outcome.owner_session} | "
-              f"suggestion=retry with --device-wait or --device-takeover")
+              f"suggestion=stop waiting: abandon this operation or ask the user; "
+              f"do not retry")
     return outcome
 
 

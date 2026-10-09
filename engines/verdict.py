@@ -234,9 +234,13 @@ def find_dismiss_button(widgets: List[dict], overlay: dict) -> Optional[dict]:
                 tgt = _clickable_target(widgets, i, ov_idx)
                 if tgt is None or tgt in hits:
                     continue
-                # 只认可 Button 类型的关闭按钮；toggle/复选框（如“不再提醒”）
-                # 点了只是勾选偏好、不会关弹窗，不当作关闭按钮 → 走返回键兜底
-                if (widgets[tgt].get('type', '') or '').lower() != 'button':
+                # 认 Button + 可点击 Text 类型的关闭按钮：自绘 Text 按钮实测
+                # 存在（如「提醒间隔」弹窗的「确定」），只认 Button 会漏掉、
+                # 走返回键兜底（弹窗+页面双层场景返回键可能关错层）；
+                # toggle/复选框（如"不再提醒"）仍排除：点了只是勾选偏好、
+                # 不会关弹窗 → 走返回键兜底
+                w_type = (widgets[tgt].get('type', '') or '').lower()
+                if w_type != 'button' and w_type != 'text':
                     continue
                 hits.append(tgt)
         if hits:
@@ -870,6 +874,19 @@ class ActionPipeline:
 
         # 内部重启检测必须在 record_acc 更新基线之前（否则基线被覆盖无法对比）
         internal_restarted = e.crash_detector.detect_internal_restart(after.widgets)
+        # 实测坑：关掉弹窗（如半模态右上角 X）时 Navigation 会重建整个栈，
+        # 所有节点 accessibilityId 从头分配 → acc 骤降被误判为「内部重启」。
+        # 操作前树里有弹窗（overlay）而操作后没有 → 骤降是弹窗关闭的副作用，
+        # 不判重启，按正常流程裁决（changes → SUCCESS）
+        if internal_restarted and before_widgets:
+            before_overlays = [ov for ov in find_overlays(before_widgets)
+                               if 'toast' not in (ov.get('type', '') or '').lower()]
+            after_overlays = [ov for ov in find_overlays(
+                after.widgets, after.get_screen_bounds())
+                if 'toast' not in (ov.get('type', '') or '').lower()]
+            if before_overlays and not after_overlays:
+                internal_restarted = False
+                print("ℹ️ accessibilityId 骤降由弹窗关闭（UI 重建）引起，不判内部重启")
         # 记录操作后 acc（供后续检测）
         e.crash_detector.record_acc(after.widgets)
         # 主动崩溃检查（进程存活 + faultlog，~0.1s）
@@ -884,6 +901,17 @@ class ActionPipeline:
         # BLOCKED_BY_DIALOG/NO_CHANGE 误报成 SUCCESS（exit 0）
         report = e._compare_with_history(after, desc)
 
+        # 实测坑：页面跳转成功（Navigation push/pop、WebView 进出）时，
+        # 页面节点销毁/重建导致 accessibilityId 骤降，被误判「内部重启」→
+        # 触发 0.8s 等待 + 二次 dump 复查（实测单次操作 5.9-7.5s，其中
+        # ~2.5s 是本误判的代价）。路由已按预期变化 = UI 重建是页面切换的
+        # 预期行为，豁免重启判定；真重启（进程退出/faultlog/UI 重建但路由
+        # 未按预期变化）由 crash_detector.detect() 主路径与复查路径兜底。
+        if (internal_restarted and report is not None
+                and report.route_changed):
+            internal_restarted = False
+            print("ℹ️ accessibilityId 骤降由页面跳转（UI 重建）引起，不判内部重启")
+
         looks_desktop = check_exit and self._looks_like_desktop(after)
         verdict = judge(e.crash_detector, after, report,
                         is_back=is_back, looks_like_desktop=looks_desktop,
@@ -893,27 +921,39 @@ class ActionPipeline:
         # 无变化时补一次“确认 dump”：动作后 UI 可能尚未稳定（页面切换/异步
         # 渲染），单次 dump 会把“其实已生效”误判为 NO_CHANGE（假阴性）。状态
         # 控件异步生效更慢，给更长等待；其余空 diff 给短等待。
+        # RESTARTED 也纳入复查：首次 dump 可能恰拿过渡态（acc 骤降误判重启），
+        # 复查拿稳定树后重新 detect 翻案——record_acc 主路径已用主 dump 更新
+        # 基线（豁免时也照常更新：UI 重建后 acc 低是新常态，若保留高基线，
+        # 后续每步都会误触发且弹窗豁免不再生效），复查树正常即翻案。
         if verdict.status in (VerdictStatus.NO_CHANGE,
-                              VerdictStatus.BACK_INEFFECTIVE):
+                              VerdictStatus.BACK_INEFFECTIVE,
+                              VerdictStatus.RESTARTED):
             has_state = self._has_state_controls(after.widgets)
             wait_s = RECHECK_STATE_WAIT if has_state else RECHECK_EMPTY_WAIT
             if has_state:
                 print("⏳ 检测到状态控件，%ss 后复查是否异步生效..." % wait_s)
+            elif verdict.status == VerdictStatus.RESTARTED:
+                print("⏳ 疑似内部重启，%ss 后复查确认（排除过渡态误判）..." % wait_s)
             else:
                 print("⏳ 空 diff，%ss 后补一次确认 dump（排除异步未稳定）..." % wait_s)
             time.sleep(wait_s)
             recheck = e._dump_and_load("recheck")
             if recheck is not None:
-                re_report = e._compare_with_history(recheck, f"{desc} [确认复查]")
+                re_report = e._compare_with_history(
+                    recheck, f"{desc} [确认复查]", print_report=False)
                 if re_report is not None and (re_report.changes
                                               or re_report.route_changed):
                     print("✅ 复查检测到变化（此前为异步未稳定），以复查结果为准")
                     # 复查通过也更新 acc 基线（主路径已更新，复查替换结果时同步）
                     e.crash_detector.record_acc(recheck.widgets)
+                    # 基线已被主路径 record_acc 更新（UI 重建后为新常态低值），
+                    # 复查树 acc 正常则重算为 False，翻案不再判重启
+                    re_restarted = e.crash_detector.detect_internal_restart(
+                        recheck.widgets)
                     verdict = judge(e.crash_detector, recheck, re_report,
                                     is_back=is_back,
                                     looks_like_desktop=looks_desktop,
-                                    internal_restarted=internal_restarted,
+                                    internal_restarted=re_restarted,
                                     expectations=expectations)
                     after.cleanup()
                     return verdict, recheck, re_report

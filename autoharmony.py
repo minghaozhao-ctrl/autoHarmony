@@ -147,9 +147,9 @@ def _make_bridge(args, timeout=30):
 
 
 def _add_page_notice_arg(p):
-    """给会改变页面的 app 命令追加：操作后是否检查页面弹窗（默认检查并提醒）"""
+    """给会改变页面的 app 命令追加：操作后是否检查页面状态（默认检查并提醒）"""
     p.add_argument('--no-page-notice', action='store_true',
-                   help='操作后不检查页面弹窗（默认会检查，检测到弹窗时提醒）')
+                   help='操作后不检查页面状态（默认检查弹窗/白屏/踢线，异常才提醒）')
 
 
 def _add_expect_text_arg(p):
@@ -203,14 +203,21 @@ def _check_page_text_exists(device, texts, timeout: float = 5.0,
         _time.sleep(1)
 
 
-def _report_page_dialogs(device, action_label):
-    """操作后检查页面覆盖层弹窗，有则打印提醒。
+def _report_page_state(device, action_label, check_login: bool = True):
+    """操作后检查页面状态：弹窗/白屏/踢线（硬异常）+ 加载中/错误文案（提醒）。
 
+    正常时无输出（保持导航命令的精简输出）；异常才展开。
     只做检测与提醒（不点击，避免误点正向按钮的副作用）；
-    返回 True=页面干净；False=检测到弹窗未处理。
-    失败/无法 dump 时按"干净"处理（不因检测失败误判命令失败）。
+    返回 True=页面正常；False=检测到硬异常（弹窗/白屏/踢线）。
+    检测失败（无法 dump）时按"正常"处理（不因检测失败误判命令失败）。
+
+    Args:
+        check_login: 是否检查"被踢下线"。logout/restart/login/目标页就是
+            登录页等场景传 False——这些场景处于登录页是预期行为，检查会误报。
     """
     from engines.hdc_engine import HdcUITestEngine
+    from engines.helpers import (WHITE_SCREEN_MIN_WIDGETS, ERROR_TEXT_KEYWORDS,
+                                 ERROR_TEXT_EXCLUDE)
     from engines.verdict import find_overlays, top_overlay, overlay_summary
     analyzer = None
     engine = None
@@ -218,24 +225,75 @@ def _report_page_dialogs(device, action_label):
         engine = HdcUITestEngine(device=device)
         analyzer = engine._dump_and_load("page_notice")
     except Exception as ex:
-        print(f"⚠️  页面弹窗检查跳过（{action_label}）: {ex}")
+        print(f"⚠️  页面状态检查跳过（{action_label}）: {ex}")
         return True
     try:
         if analyzer is None:
-            print(f"⚠️  页面弹窗检查跳过（{action_label}，获取控件树失败）")
+            print(f"⚠️  页面状态检查跳过（{action_label}，获取控件树失败）")
             return True
-        overlays = find_overlays(analyzer.widgets, analyzer.get_screen_bounds())
-        if not overlays:
-            return True
-        top = top_overlay(overlays)
-        assert top is not None
-        summary = overlay_summary(analyzer.widgets, top)
-        print(f"🔔 {action_label}后检测到弹窗未处理: "
-              f"[{top.get('type', '')}] {summary}")
-        print("ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=post_action_overlay | "
-              "suggestion=追加 --auto-handle-dialog（click-device）自动处理，"
-              "或 ui dismiss-dialogs 清理后重试")
-        return False
+        widgets = analyzer.widgets
+        hard_failed = False
+
+        # 1. 白屏/未渲染（硬异常：页面不可用，后续操作必失败）
+        if len(widgets) < WHITE_SCREEN_MIN_WIDGETS:
+            print(f"⚠️ {action_label}后控件数异常少（{len(widgets)} 个），"
+                  "页面疑似白屏或未渲染完成")
+            print("ACTION_VERDICT: FAILED | reason=white_screen | "
+                  "suggestion=等待渲染完成后重试；持续白屏则 app restart 或查 hilog")
+            hard_failed = True
+
+        # 2. 踢线（硬异常：会话失效，后续操作必失败）
+        #    logout/restart/login/导航目标为登录页时跳过（处于登录页是预期）
+        if check_login:
+            try:
+                route = engine._get_current_route_cached()
+            except Exception:
+                route = None
+            if route:
+                top_name = (route[-1] or '').lower()
+                if 'login' in top_name and len(route) > 1:
+                    print(f"⚠️ {action_label}后处于登录页（{route[-1]}），"
+                          "会话可能已失效（被踢下线）")
+                    print("ACTION_VERDICT: FAILED | reason=session_expired | "
+                          "suggestion=重新登录（app login）后重试")
+                    hard_failed = True
+
+        # 3. 弹窗（硬异常：后续操作会被挡）
+        overlays = find_overlays(widgets, analyzer.get_screen_bounds())
+        if overlays:
+            top = top_overlay(overlays)
+            if top is not None:
+                summary = overlay_summary(widgets, top)
+                print(f"🔔 {action_label}后检测到弹窗未处理: "
+                      f"[{top.get('type', '')}] {summary}")
+                print("ACTION_VERDICT: BLOCKED_BY_DIALOG | reason=post_action_overlay | "
+                      "suggestion=追加 --auto-handle-dialog（click-device）自动处理，"
+                      "或 ui dismiss-dialogs 清理后重试")
+                hard_failed = True
+
+        # 4. 加载中（软提醒：可能只是过渡态，不算失败）
+        if any('loadingprogress' in (w.get('type', '') or '').lower()
+               for w in widgets):
+            print(f"⏳ {action_label}后检测到加载指示器，"
+                  "页面内容可能未就绪（重要判定请等加载完成）")
+
+        # 5. 错误文案（软提醒：可能是测试预期的错误提示场景）
+        err_texts = []
+        for w in widgets:
+            if (w.get('type', '') or '') != 'Text':
+                continue
+            txt = (w.get('text') or '').strip()
+            if txt and any(k in txt for k in ERROR_TEXT_KEYWORDS) and len(txt) <= 50:
+                if any(x in txt for x in ERROR_TEXT_EXCLUDE):
+                    continue
+                err_texts.append(txt)
+                if len(err_texts) >= 3:
+                    break
+        if err_texts:
+            print(f"⚠️ {action_label}后页面存在错误文案: "
+                  + " / ".join(f'"{t}"' for t in err_texts))
+
+        return not hard_failed
     finally:
         if analyzer is not None:
             analyzer.cleanup()
@@ -246,13 +304,16 @@ def _report_page_dialogs(device, action_label):
                 pass
 
 
-def _page_notice_or_exit(args, action_label):
-    """页面改变类 app 命令的统一收尾：非 --no-page-notice 时检查弹窗并提醒；
-    检测到弹窗未处理且用户未要求跳过检查时以失败退出（信号给 Agent/CI）。"""
+def _page_notice_or_exit(args, action_label, check_login: bool = True):
+    """页面改变类 app 命令的统一收尾：非 --no-page-notice 时检查页面状态
+    （弹窗/白屏/踢线等）并提醒；检测到硬异常时以失败退出（信号给 Agent/CI）。
+
+    check_login=False 用于 logout/restart/login 等处于登录页是预期的场景。
+    """
     if getattr(args, 'no_page_notice', False):
         return
     device_id = _detect_device(args.device)
-    if not _report_page_dialogs(device_id, action_label):
+    if not _report_page_state(device_id, action_label, check_login=check_login):
         sys.exit(1)
 
 
@@ -478,7 +539,7 @@ def cmd_app_navigate(args):
         deadline = time.time() + timeout
         while True:
             route = bridge.get_current_route()
-            if route and route[-1] == args.page:
+            if route and route[-1] and args.page in route[-1]:
                 print(f"✅ 页面跳转成功: {args.page}")
                 break
             if time.time() >= deadline:
@@ -494,7 +555,8 @@ def cmd_app_navigate(args):
         if not _check_page_text_exists(device_id, args.expect_text,
                                        timeout=timeout, action_label="跳转"):
             sys.exit(1)
-    _page_notice_or_exit(args, f"跳转 {args.page}")
+    _page_notice_or_exit(args, f"跳转 {args.page}",
+                         check_login='login' not in args.page.lower())
 
 
 def cmd_app_back(args):
@@ -509,13 +571,20 @@ def cmd_app_back(args):
         last_route = object()  # 哨兵：与任何列表都不相等
         while time.time() < deadline:
             after_route = bridge.get_current_route()
-            if after_route == last_route:
+            # None（桥接瞬时超时）不参与稳定判定：连续两次 None 会被
+            # 误判「已稳定」→「App 已退出」假阴性
+            if after_route is not None and after_route == last_route:
                 stable_route = after_route
                 break
             last_route = after_route
             time.sleep(1)
         if stable_route is None:
             stable_route = last_route if isinstance(last_route, list) else None
+            # deadline 命中采信的是最后一次采样（可能为过渡态瞬拍），补采一次
+            if stable_route is not None:
+                final = bridge.get_current_route()
+                if final is not None:
+                    stable_route = final
 
         if stable_route and before_route is not None \
                 and stable_route != before_route:
@@ -561,7 +630,8 @@ def cmd_app_restart(args):
     if not ok or "error" in (out or "").lower():
         _fail("启动应用失败: %s" % out)
     print(f"✅ 已冷启动应用: {default_bundle()}/EntryAbility")
-    _page_notice_or_exit(args, "冷启动")
+    # 冷启动后未登录时停在登录页是预期状态，不做踢线检查
+    _page_notice_or_exit(args, "冷启动", check_login=False)
 
     if args.page:
         time.sleep(3)  # 等待冷启动完成
@@ -573,9 +643,10 @@ def cmd_app_restart(args):
             deadline = time.time() + 8
             while time.time() < deadline:
                 route = bridge.get_current_route()
-                if route and route[-1] == args.page:
+                if route and route[-1] and args.page in route[-1]:
                     print(f"✅ 重启并导航成功: {args.page}")
-                    _page_notice_or_exit(args, f"重启后跳转 {args.page}")
+                    _page_notice_or_exit(args, f"重启后跳转 {args.page}",
+                                         check_login='login' not in args.page.lower())
                     return
                 time.sleep(1)
             _fail("重启后导航未生效，期望: %s" % args.page)
@@ -614,7 +685,8 @@ def cmd_app_login(args):
         result = bridge.login(args.phone, args.password)
         if result.get("success"):
             print(f"✅ 登录成功: {args.phone}")
-            _page_notice_or_exit(args, "登录")
+            # 登录成功瞬间页面可能仍在登录页过渡，不做踢线检查
+            _page_notice_or_exit(args, "登录", check_login=False)
         else:
             _fail("登录失败: %s" % result.get('message', '未知错误'))
     finally:
@@ -626,7 +698,8 @@ def cmd_app_logout(args):
     try:
         bridge.logout()
         print("✅ 退出登录成功")
-        _page_notice_or_exit(args, "退出登录")
+        # 登出后停在登录页是预期状态，不做踢线检查
+        _page_notice_or_exit(args, "退出登录", check_login=False)
     finally:
         bridge.close()
 
@@ -648,6 +721,13 @@ def cmd_app_route(args):
     _, bridge = _make_bridge(args)
     try:
         route = bridge.get_current_route()
+        if not route:
+            # None 是 get_current_route 的合法返回（桥接不可达/瞬时超时），
+            # 无守卫时 enumerate(route,1) 直接 TypeError 裸崩
+            print("❌ 获取路由栈失败（桥接不可达或应用未运行）")
+            print("ACTION_VERDICT: ERROR | reason=route_unreachable | "
+                  "suggestion=app restart 后重试")
+            sys.exit(1)
         print("📍 当前路由栈:")
         for i, r in enumerate(route, 1):
             print(f"   {i}. {r}")
@@ -875,7 +955,8 @@ def cmd_ui_swipe(args):
         return engine.swipe(x1, y1, x2, y2, args.operation,
                              expectations=expectations,
                              fresh_before=args.fresh_before,
-                             auto_recover=not args.no_recover)
+                             auto_recover=not args.no_recover,
+                             velocity=getattr(args, 'velocity', None))
 
     ok = _run_ui_action(args, engine, action)
     sys.exit(0 if ok else 1)
@@ -1032,7 +1113,8 @@ def cmd_ui_swipe_direction(args):
         return engine.swipe_direction(args.direction, args.distance, args.operation,
                                         expectations=expectations,
                                         fresh_before=args.fresh_before,
-                                        auto_recover=not args.no_recover)
+                                        auto_recover=not args.no_recover,
+                                        velocity=getattr(args, 'velocity', None))
 
     ok = _run_ui_action(args, engine, action)
     _close_engine(engine)
@@ -1580,36 +1662,6 @@ def cmd_device_status(args):
               f"心跳 {c['age_s']}s 前  pid={c['pid']}{mine}")
 
 
-def cmd_device_release(args):
-    lock = _device_lock_module()
-    me = lock.resolve_session_id()
-    if args.release_all:
-        device, session, stale_only = None, None, False
-    elif args.stale:
-        device, session, stale_only = args.device, None, True
-    elif args.device or args.session:
-        device, session, stale_only = args.device, args.session, False
-    else:
-        device, session, stale_only = None, me, False
-    if not (args.release_all or args.stale or args.device or args.session) and not me:
-        verdict = _make_verdict("FAILED", "设备锁已关闭，且未指定 --device/--session")
-        _emit_json(verdict, args)
-        print("无本会话声明可释放（设备锁已关闭）")
-        sys.exit(1)
-    removed = lock.release(device=device, session=session, stale_only=stale_only)
-    verdict = _make_verdict("SUCCESS",
-                            f"released {len(removed)} claim(s)",
-                            released=len(removed),
-                            claims=[{"device": c.get("device"),
-                                     "session": c.get("session")} for c in removed])
-    _emit_json(verdict, args)
-    if not removed:
-        print("没有匹配的设备声明")
-        return
-    for c in removed:
-        print(f"✅ 释放 {c.get('device')}（会话 {c.get('session')}）")
-
-
 # ==================== parser ====================
 
 def build_parser():
@@ -1618,19 +1670,19 @@ def build_parser():
         description='HarmonyOS UI Automation Testing CLI: '
                     'UI actions & assertions, widget tree analysis, batch scripts.')
     parser.add_argument('--json', dest='json_output', action='store_true',
-                        help='Output structured JSON (for AI agents)')
+                        help='输出结构化 JSON（供 AI 消费）')
     parser.add_argument('--no-artifacts', dest='no_artifacts', action='store_true',
-                        help='Disable failure evidence capture '
-                             '(screenshot/hilog/dump; default on)')
+                        help='关闭失败留证（截图/hilog/dump；默认开启）')
     parser.add_argument('--device-wait', type=float, default=None, metavar='SEC',
-                        help='Wait up to SEC seconds for a device held by another session')
+                        help='等待其他会话占用的设备最多 SEC 秒')
     parser.add_argument('--device-takeover', action='store_true',
-                        help='Forcefully take over a device held by another live session')
+                        default=os.environ.get('HMUITEST_TAKEOVER') == '1',
+                        help='强制接管其他会话占用的设备 '
+                             '(env HMUITEST_TAKEOVER=1 默认开启，日常免输)')
     parser.add_argument('--no-device-lock', action='store_true',
-                        help='Disable session device-claim locking for this command')
+                        help='本条命令禁用会话设备占用锁')
     parser.add_argument('--fast', action='store_true',
-                        help='Fast mode: settle 0.1s + silent diff/page summary '
-                             '(for batch regression runs)')
+                        help='快速模式：settle 0.1s + 静默差异/页面摘要（批量回归用）')
     sub = parser.add_subparsers(dest='command', metavar='<command>', required=True)
 
     # ---------- app ----------
@@ -1681,7 +1733,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_app_route)
 
-    p = app_sub.add_parser('wakeup', help='唤醒屏幕（wakeup+常亮，可选 --unlock 上滑解锁）')
+    p = app_sub.add_parser('wakeup', help='唤醒屏幕（wakeup+60s 防熄屏，可选 --unlock 上滑解锁）')
     p.add_argument('--unlock', action='store_true', help='唤醒后尝试上滑解锁')
     _add_device_arg(p)
     p.set_defaults(func=cmd_app_wakeup)
@@ -1717,10 +1769,10 @@ def build_parser():
     p.set_defaults(func=cmd_app_click_device)
 
     # ---------- aa ----------
-    aa = sub.add_parser('aa', help='Deep Link explicit launch (aa start)')
+    aa = sub.add_parser('aa', help='Deep Link 显式启动')
     aa_sub = aa.add_subparsers(dest='subcommand', metavar='<action>', required=True)
 
-    p = aa_sub.add_parser('start', help='Launch app via Deep Link URI')
+    p = aa_sub.add_parser('start', help='通过 Deep Link URI 启动应用')
     p.add_argument('uri', help='Deep Link URI')
     p.add_argument('--bundle', default=default_bundle(),
                    help='bundleName (default $HMUITEST_BUNDLE 或内置默认)')
@@ -1738,7 +1790,7 @@ def build_parser():
     p.set_defaults(func=cmd_aa_start)
 
     # ---------- ui ----------
-    ui = sub.add_parser('ui', help='UI actions & assertions (auto diff report)')
+    ui = sub.add_parser('ui', help='UI 操作与断言（自动差异报告）')
     ui_sub = ui.add_subparsers(dest='subcommand', metavar='<action>', required=True)
 
     def add_history(p):
@@ -1748,7 +1800,7 @@ def build_parser():
                         'override base with env HMUITEST_HISTORY_DIR)')
 
     # Coordinate-based (HdcUITestEngine)
-    p = ui_sub.add_parser('click', help='Click at coordinates')
+    p = ui_sub.add_parser('click', help='点击坐标')
     p.add_argument('x', type=float, help='X coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('y', type=float, help='Y coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('--pct', action='store_true',
@@ -1775,7 +1827,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_click_sequence)
 
-    p = ui_sub.add_parser('double-click', help='Double-click at coordinates')
+    p = ui_sub.add_parser('double-click', help='双击坐标')
     p.add_argument('x', type=float, help='X coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('y', type=float, help='Y coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('--pct', action='store_true',
@@ -1785,7 +1837,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_double_click)
 
-    p = ui_sub.add_parser('long-click', help='Long-click at coordinates')
+    p = ui_sub.add_parser('long-click', help='长按坐标')
     p.add_argument('x', type=float, help='X coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('y', type=float, help='Y coordinate (px, or 0-1 ratio with --pct)')
     p.add_argument('--pct', action='store_true',
@@ -1795,19 +1847,23 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_long_click)
 
-    p = ui_sub.add_parser('swipe', help='Swipe between coordinates')
+    p = ui_sub.add_parser('swipe', help='坐标间滑动')
     p.add_argument('x1', type=float, help='Start X (px, or 0-1 ratio with --pct)')
     p.add_argument('y1', type=float, help='Start Y (px, or 0-1 ratio with --pct)')
     p.add_argument('x2', type=float, help='End X (px, or 0-1 ratio with --pct)')
     p.add_argument('y2', type=float, help='End Y (px, or 0-1 ratio with --pct)')
     p.add_argument('--pct', action='store_true',
                    help='Interpret all coords as 0-1 screen ratios')
+    p.add_argument('--velocity', type=int, default=None,
+                   help='滑动速度 px/s（官方语义：uiInput swipe 最后参数是 '
+                        'velocity 200-40000 默认 600，非 duration）。'
+                        '一屏滚动建议 1500-3000 提速')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_swipe)
 
-    p = ui_sub.add_parser('input', help='Input text to focused field')
+    p = ui_sub.add_parser('input', help='输入文本到焦点输入框')
     p.add_argument('text', help='Text to input')
     p.add_argument('--clear', action='store_true',
                    help='输入前先清空当前焦点输入框（DEL×6 + Ctrl+A 全选 + DEL），'
@@ -1817,14 +1873,14 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_input)
 
-    p = ui_sub.add_parser('back', help='Press back key')
+    p = ui_sub.add_parser('back', help='按返回键')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_back)
 
     # Semantic (SemanticEngine)
-    p = ui_sub.add_parser('click-by-text', help='Click widget by text (fuzzy match on exact fail)')
+    p = ui_sub.add_parser('click-by-text', help='按文本点击控件（精确失败时模糊匹配）')
     p.add_argument('text', help='Widget text')
     p.add_argument('--index', type=int, default=None,
                    help='Click Nth match (default 0)')
@@ -1835,35 +1891,35 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_click_by_text)
 
-    p = ui_sub.add_parser('click-by-id', help='Click widget by key/id')
+    p = ui_sub.add_parser('click-by-id', help='按 key/id 点击控件')
     p.add_argument('key', help='Widget key or id')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_click_by_id)
 
-    p = ui_sub.add_parser('click-by-type', help='Click first widget of type')
+    p = ui_sub.add_parser('click-by-type', help='点击该类型第一个控件')
     p.add_argument('type', help='Widget type, e.g. Button')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_click_by_type)
 
-    p = ui_sub.add_parser('double-click-by-text', help='Double-click widget by text')
+    p = ui_sub.add_parser('double-click-by-text', help='按文本双击控件')
     p.add_argument('text', help='Widget text')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_double_click_by_text)
 
-    p = ui_sub.add_parser('long-click-by-text', help='Long-click widget by text')
+    p = ui_sub.add_parser('long-click-by-text', help='按文本长按控件')
     p.add_argument('text', help='Widget text')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_long_click_by_text)
 
-    p = ui_sub.add_parser('input-by-text', help='Input to field by text')
+    p = ui_sub.add_parser('input-by-text', help='按文本输入到输入框')
     p.add_argument('target', help='Target field text/hint')
     p.add_argument('text', help='Text to input')
     add_history(p)
@@ -1871,7 +1927,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_input_by_text)
 
-    p = ui_sub.add_parser('input-by-type', help='Input to field by type')
+    p = ui_sub.add_parser('input-by-type', help='按类型输入到输入框')
     p.add_argument('type', help='Target field type, e.g. TextInput')
     p.add_argument('text', help='Text to input')
     add_history(p)
@@ -1879,16 +1935,19 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_input_by_type)
 
-    p = ui_sub.add_parser('swipe-direction', help='Swipe in direction')
+    p = ui_sub.add_parser('swipe-direction', help='按方向滑动')
     p.add_argument('direction', choices=['UP', 'DOWN', 'LEFT', 'RIGHT'], help='Swipe direction')
     p.add_argument('--distance', type=int, default=60, help='Swipe distance (default 60)')
+    p.add_argument('--velocity', type=int, default=None,
+                   help='滑动速度 px/s（uiInput swipe 最后参数是 velocity '
+                        '200-40000 默认 600，非 duration）')
     add_history(p)
     _add_expect_args(p)
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_swipe_direction)
 
     # Check/screenshot (no history)
-    p = ui_sub.add_parser('screenshot', help='Save screenshot to local file')
+    p = ui_sub.add_parser('screenshot', help='保存截图到本地文件')
     p.add_argument('path', help='Local save path')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_screenshot)
@@ -1903,7 +1962,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_snapshot)
 
-    p = ui_sub.add_parser('check-dialog', help='Check if dialog exists')
+    p = ui_sub.add_parser('check-dialog', help='检查弹窗是否存在')
     p.add_argument('type', nargs='?', const='Dialog', default='Dialog',
                    help='Dialog type (default Dialog)')
     _add_device_arg(p)
@@ -1932,21 +1991,21 @@ def build_parser():
                    help='Max dump/scroll iterations (default 10)')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_picker_set)
-    p = ui_sub.add_parser('check-exist', help='Check if widget exists')
+    p = ui_sub.add_parser('check-exist', help='检查控件是否存在')
     p.add_argument('--text', default=None, help='Match by text (contains)')
     p.add_argument('--id', default=None, help='Match by key/id')
     p.add_argument('--type', default=None, help='Match by type')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_check_exist)
 
-    p = ui_sub.add_parser('find', help='Find widget and print info')
+    p = ui_sub.add_parser('find', help='查找控件并打印信息')
     p.add_argument('--text', default=None, help='Match by text (contains)')
     p.add_argument('--id', default=None, help='Match by key/id')
     p.add_argument('--type', default=None, help='Match by type')
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_find)
 
-    p = ui_sub.add_parser('scroll-find', help='Smart scroll to find widget')
+    p = ui_sub.add_parser('scroll-find', help='智能滚动查找控件')
     p.add_argument('text', help='Target text (contains match)')
     p.add_argument('--swipes', type=int, default=8, help='Max scroll pages (default 8)')
     _add_device_arg(p)
@@ -1958,7 +2017,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_collect)
 
-    p = ui_sub.add_parser('dismiss-dialogs', help='Dismiss overlay dialogs')
+    p = ui_sub.add_parser('dismiss-dialogs', help='清理覆盖层弹窗')
     p.add_argument('--rounds', type=int, default=3, help='Max dismiss rounds (default 3)')
     p.add_argument('--wait', type=float, default=0.0,
                    help='Wait N s before first check (let delayed dialog appear)')
@@ -1969,7 +2028,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_ui_dismiss_dialogs)
 
-    p = ui_sub.add_parser('wait-for', help='Wait for text or Toggle state')
+    p = ui_sub.add_parser('wait-for', help='等待文本或 Toggle 状态')
     p.add_argument('text', nargs='?', default=None, help='Target text (contains match)')
     p.add_argument('--gone', action='store_true', help='Wait for text to disappear')
     p.add_argument('--toggle-x', type=float, default=None,
@@ -1986,7 +2045,7 @@ def build_parser():
     p.set_defaults(func=cmd_ui_wait_for)
 
     # ---------- log ----------
-    log = sub.add_parser('log', help='hilog / fault log grab (anti-hang)')
+    log = sub.add_parser('log', help='hilog / 故障日志抓取（防卡死）')
     log_sub = log.add_subparsers(dest='subcommand', metavar='<action>', required=True)
     p = log_sub.add_parser(
         'grab',
@@ -2016,27 +2075,27 @@ def build_parser():
     p.set_defaults(func=cmd_log_grab)
 
     # ---------- tree ----------
-    tree = sub.add_parser('tree', help='Widget tree analysis')
+    tree = sub.add_parser('tree', help='控件树分析')
     tree_sub = tree.add_subparsers(dest='subcommand', metavar='<action>', required=True)
 
-    p = tree_sub.add_parser('show', help='Analyze local widget tree JSON file')
+    p = tree_sub.add_parser('show', help='分析本地控件树 JSON 文件')
     p.add_argument('file', help='Widget tree JSON file path')
     _add_analysis_args(p)
     p.set_defaults(func=cmd_tree_show)
 
-    p = tree_sub.add_parser('dump', help='Dump widget tree from device and analyze')
+    p = tree_sub.add_parser('dump', help='从设备获取控件树并分析')
     _add_device_arg(p)
     _add_analysis_args(p)
     p.set_defaults(func=cmd_tree_dump)
 
-    p = tree_sub.add_parser('diff', help='Compare two widget tree files')
+    p = tree_sub.add_parser('diff', help='比较两个控件树文件')
     p.add_argument('file1', help='Before widget tree file')
     p.add_argument('file2', help='After widget tree file')
     p.add_argument('--operation', default="", help='Operation description')
     _add_device_arg(p)
     p.set_defaults(func=cmd_tree_diff)
 
-    p = tree_sub.add_parser('auto', help='Auto-diff: dump and compare with last baseline')
+    p = tree_sub.add_parser('auto', help='自动差异：dump 并与上次基线比较')
     p.add_argument('--operation', default="", help='Operation description')
     p.add_argument('--history-dir', default=None,
                    help='Base dir for history baseline; actual files go to a per-device '
@@ -2046,10 +2105,10 @@ def build_parser():
     p.set_defaults(func=cmd_tree_auto)
 
     # ---------- script ----------
-    script = sub.add_parser('script', help='Batch script execution')
+    script = sub.add_parser('script', help='批量脚本执行')
     script_sub = script.add_subparsers(dest='subcommand', metavar='<action>', required=True)
 
-    p = script_sub.add_parser('run', help='Run test script file')
+    p = script_sub.add_parser('run', help='执行测试脚本文件')
     p.add_argument('file', help='Script JSON file path')
     p.add_argument('--history-dir', default=None,
                    help='Base dir for history baseline; actual files go to a per-device '
@@ -2058,7 +2117,7 @@ def build_parser():
     _add_device_arg(p)
     p.set_defaults(func=cmd_script_run)
 
-    p = script_sub.add_parser('record', help='Record UI actions as reusable script')
+    p = script_sub.add_parser('record', help='录制 UI 操作为可复用脚本')
     p.add_argument('record_action', choices=['start', 'stop', 'status'],
                    help='start: begin recording, stop: save & stop, status: check')
     p.add_argument('--output', '-o', default=None,
@@ -2066,20 +2125,11 @@ def build_parser():
     p.set_defaults(func=cmd_script_record)
 
     # ---------- device ----------
-    device = sub.add_parser('device', help='Device claims across sessions (parallel agents)')
+    device = sub.add_parser('device', help='跨会话设备占用（并行 agent 防互拆）')
     device_sub = device.add_subparsers(dest='subcommand', metavar='<action>', required=True)
 
-    p = device_sub.add_parser('status', help='List device claims (which session holds which device)')
+    p = device_sub.add_parser('status', help='列出设备占用（哪个会话占哪个设备）')
     p.set_defaults(func=cmd_device_status)
-
-    p = device_sub.add_parser('release', help='Release device claims')
-    p.add_argument('--device', '-d', default=None, help='Only release this device')
-    p.add_argument('--session', default=None, help='Only release claims of this session')
-    p.add_argument('--stale', action='store_true',
-                   help='Only release claims whose heartbeat has expired')
-    p.add_argument('--all', dest='release_all', action='store_true',
-                   help='Release every claim regardless of session')
-    p.set_defaults(func=cmd_device_release)
 
     return parser
 
@@ -2153,7 +2203,8 @@ def main():
                             device=target,
                             owner_session=blocked.owner_session,
                             owner_pid=blocked.owner_pid,
-                            suggestion="retry with --device-wait or --device-takeover")
+                            suggestion="stop waiting: abandon this operation "
+                                       "or ask the user; do not retry")
                         _write_json(_attach_log_path(verdict))
                     sys.exit(1)
                 args.device = target
