@@ -1,11 +1,12 @@
 # autoharmony 🎯
 
-> **HarmonyOS UI testing, built for the agent loop — not for a human writing test cases.**
+**HarmonyOS on-device UI testing for AI agents.** Let Claude Code / Cursor / Codex verify the ArkTS they wrote — on a real device, on their own.
+
 > *An agent explores once; the script it saves runs forever.*
 
-[![License: MIT](https://img.shields.io/github/license/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/blob/main/LICENSE) [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue)](https://github.com/minghaozhao-ctrl/autoHarmony) [![Stars](https://img.shields.io/github/stars/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/stargazers) ![Platform: HarmonyOS](https://img.shields.io/badge/platform-HarmonyOS-red)
+[![License: MIT](https://img.shields.io/github/license/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/blob/main/LICENSE) [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/) [![Platform: HarmonyOS](https://img.shields.io/badge/platform-HarmonyOS-red)]() [![Stars](https://img.shields.io/github/stars/minghaozhao-ctrl/autoHarmony)](https://github.com/minghaozhao-ctrl/autoHarmony/stargazers)
 
-[中文](README.md) · [Agent Guide](docs/AGENT_GUIDE.md) · [Usage](docs/USAGE.md) · [Bridge](docs/BRIDGE.md)
+[中文](README.md) · [Quick start](#quick-start) · [Docs map](#documentation-map) · [Full comparison](docs/COMPARISON.md)
 
 ---
 
@@ -30,6 +31,84 @@ With `--json`, human logs go to stderr and stdout holds JSON only — directly p
 Explore → verify → record → replay. The exploration becomes a regression script. Next code change: `script run`. No human test cases, no flaky utilities, no retyping the same flow.
 
 **Agent writes code → Agent tests on real hardware → Script is saved → Next change is one command**
+
+---
+
+## See it in 30 seconds
+
+### After every action: a deterministic verdict + a diff
+
+The verdict says pass or fail; the diff says *exactly what happened* — no screenshots, no guessing:
+
+```text
+ACTION_VERDICT: SUCCESS | reason=路由发生变化
+
+🧭 组件树变化  操作: click 设置  时间: 2026-09-18 14:05:22
+📊 新增3 · 消失0 · 位置变化12 · 文本/状态/属性2 · 遮挡0 · 解除遮挡0 · 其它0
+● 新增(3)  →  有信息量 1 条
+    + Text '语言'  [56,820][1180,900]
+● 位置变化(12)  →  合并 2 组同位移
+    ▸ 位移(+0,-120)px · 8 节点 · 如 u=abc123 Column
+PAGE_RESULT: CHANGES_DETECTED
+```
+
+---
+
+## Quick start
+
+**Requirements**: Python 3.9+, `hdc` in PATH, a HarmonyOS device (USB or network).
+
+```bash
+# Install (pick one)
+pipx install git+https://github.com/minghaozhao-ctrl/autoHarmony.git   # recommended: isolated CLI install
+pip install git+https://github.com/minghaozhao-ctrl/autoHarmony.git    # or into the current env
+
+# From source (development / hacking)
+git clone git@github.com:minghaozhao-ctrl/autoHarmony.git
+cd autoHarmony && pip install -e .
+
+# Verify
+hdc list targets                                    # should print your device serial
+export HMUITEST_BUNDLE=com.your.app                 # your app's bundleName (defaults to com.cmcc.DigitalHome)
+autoharmony ui check-exist "设置"                    # check a widget exists (~0.6s)
+autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
+```
+
+That's it — you're ready to point an agent at your app. `aa` / `ui` actions / `script` / `device` support `--json` structured output; `tree dump --json` instead returns search results as a JSON array. The full command list lives in [docs/USAGE.md](docs/USAGE.md).
+
+## The loop in 30 seconds
+
+```bash
+# 1. Agent (or human) explores the app — structured verdicts come back
+$ autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
+{
+  "status": "SUCCESS",
+  "reason": "Action completed",
+  "exit": 0,
+  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
+}
+
+# 2. Record the exploration as a reusable regression script
+$ autoharmony script record start
+$ autoharmony ui click-by-text "设置"
+$ autoharmony ui click-by-text "关于"
+$ autoharmony script record stop --output settings_test.json
+
+# 3. After every code change: replay. No retyping, no human test case.
+$ autoharmony --json script run settings_test.json
+{
+  "status": "SUCCESS",
+  "reason": "2/2 steps passed",
+  "exit": 0,
+  "all_passed": true,
+  "passed": 2,
+  "failed": 0,
+  "total": 2,
+  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
+}
+```
+
+Failed a step? The verdict + tree diff tell the agent exactly which selector changed — `ui scroll-find`, `tree dump`, fix the JSON, rerun. Self-healing, not manual triage. See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 
 ---
 
@@ -148,144 +227,24 @@ Every run appends its complete stdout+stderr — including tracebacks — to `~/
 
 ---
 
-## Quick start
-
-```bash
-git clone git@github.com:minghaozhao-ctrl/autoHarmony.git
-cd autoHarmony && pip install .
-hdc list targets                 # verify a device is connected
-
-autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
-```
-
-That's it — you're ready to point an agent at your app. `aa` / `ui` actions / `script` / `device` support `--json` structured output; `tree dump --json` instead returns search results as a JSON array. The full command list lives in [docs/USAGE.md](docs/USAGE.md).
-
-## The loop in 30 seconds
-
-```bash
-# 1. Agent (or human) explores the app — structured verdicts come back
-$ autoharmony --json ui click-by-text "设置" --expect-route "SettingsPage"
-{
-  "status": "SUCCESS",
-  "reason": "Action completed",
-  "exit": 0,
-  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
-}
-
-# 2. Record the exploration as a reusable regression script
-$ autoharmony script record start
-$ autoharmony ui click-by-text "设置"
-$ autoharmony ui click-by-text "关于"
-$ autoharmony script record stop --output settings_test.json
-
-# 3. After every code change: replay. No retyping, no human test case.
-$ autoharmony --json script run settings_test.json
-{
-  "status": "SUCCESS",
-  "reason": "2/2 steps passed",
-  "exit": 0,
-  "all_passed": true,
-  "passed": 2,
-  "failed": 0,
-  "total": 2,
-  "log_path": "/Users/you/.hmuitest/logs/uitest-20260918.log"
-}
-```
-
-Failed a step? The verdict + tree diff tell the agent exactly which selector changed — `ui scroll-find`, `tree dump --overview`, fix the JSON, rerun. Self-healing, not manual triage. See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-
----
-
 ## How it compares
 
-### vs. agent-device
+**vs. [agent-device](https://github.com/callstack/agent-device)** — the closest neighbor: an agent-native CLI that also covers HarmonyOS, but across 9 platforms:
 
-[agent-device](https://github.com/callstack/agent-device) is the closest neighbor — an agent-native CLI that also reaches HarmonyOS (via `hdc` + ArkUI `uitest`) among its many targets. It's a strong, broad tool: nine platform families, MCP + typed Node.js API, worktree sessions, device clouds, rich evidence. `autoharmony` makes a narrower bet — HarmonyOS only — and spends its depth there.
-
-**Where `autoharmony` pulls ahead on HarmonyOS:**
-
-- **The screen arrives as text** — a spatial grid with control glyphs; no screenshots, no vision model.
-- **Dialogs and crashes fold into the verdict** — the agent isn't left to notice a modal or a dead process.
-- **Every failure leaves evidence** — screenshot, `hilog` (plus faultlog on crash) and dump land in `artifacts/`, plus the log path.
-- **Python + `hdc` only** — no daemon, no dependencies, ~0.6s / ~2.6s.
-
-**See the screen as text — no screenshots, no vision model.** `tree dump --overview` renders the live widget tree as a box-drawing character grid: borders `┌─┐│└┘`, with a glyph for what each control *is* — `◉` button, `◆` icon, `▦` image, `◐` toggle, `▏` text input, `░` image fill. The agent reads the layout *spatially* — what sits beside what, what is off to the right — as pure text. When a dialog is up, the render splits into a dialog panel (`【弹窗内容】`) and a base panel (`【底层内容】`) so the agent sees exactly what is covering the screen.
-
-```text
-┌────────────────────────────────────────────┐
-│ ┌────────────────────────────────────────┐ │
-│ │设置                                      │ │
-│ └────────────────────────────────────────┘ │
-│ ┌────────────────────────────┐             │
-│ │账号与安全                       │        ◆    │
-│ └────────────────────────────┘             │
-│ ┌────────────────────────────┐      ┌────┐ │
-│ │深色模式                        │      │ ◐  │ │
-│ │                            │      └────┘ │
-│ ┌────────────────────────────┐             │
-│ │通知                          │      ┌────┐ │
-│ │                            │      │ ◐  │ │
-│ └────────────────────────────┘      └────┘ │
-│ ┌─────────────────┐ ┌────────────────────┐ │
-│ │退出登录             │ │         ▏          │ │
-│ │                 │ │                    │ │
-│ └─────────────────┘ └────────────────────┘ │
-│ ┌─────┐                                    │
-│ │░░░░░│                                    │
-│ └─────┘                                    │
-└────────────────────────────────────────────┘
-```
-
-That spatial map is an edge a flat `@eN` ref list doesn't give you. The rest of the loop follows the same principle — deterministic, local, verdict-first:
-
-| On HarmonyOS depth — where it counts | autoharmony | agent-device (HarmonyOS) |
+| Where HarmonyOS depth shows | autoharmony | agent-device |
 |---|---|---|
-| **Perceive the screen** | ✅ spatial text grid + control glyphs, fully local | Flat accessibility snapshot / `@eN` refs |
-| **Reach an off-screen element** | ✅ `ui scroll-find "text"` | — (scroll, then re-snapshot) |
-| **Dialog / alert handling** | ✅ deterministic, automatic | ⚠️ not advertised for HarmonyOS |
-| **Crash detection** | ✅ CppCrash / JSCrash / AppFreeze → verdict | ⚠️ not advertised for HarmonyOS |
-| **Per-action verdict** | ✅ 8 states + exit 0/1/2 | diff after `--settle` |
-| **Route / state / no-change assertions** | ✅ polled, built-in | — (predicates, no route check) |
-| **Overlay / occlusion awareness** | ✅ split render + occluded/revealed categories in the diff | — |
-| **System-UI noise filtering** | ✅ status-bar clock / battery excluded from diffs | — |
-| **Automatic failure evidence** | ✅ screenshot + `hilog` (+ faultlog on crash), local, zero setup | ⚠️ artifact bundles (video / logs / traces) |
-| **Business-layer access** | ✅ JSON-RPC bridge | — (UI only) |
-| **Runtime** | ✅ Python + `hdc` only — no daemon, no deps, ~0.6s / ~2.6s | Node.js 22.12+ + daemon |
-| **Parallel agents** | ✅ session-scoped device claims (no cloud backends) | ✅ worktree sessions, device claims, cloud backends |
+| Screen perception | ✅ widget-tree text dump (text/type/bounds) + semantic targeting | flat `@eN` ref snapshot |
+| Dialogs / crashes | ✅ deterministic, folded into verdict | ⚠️ not claimed for HarmonyOS |
+| Post-action verdict | ✅ eight states + exit 0/1/2 | snapshot diff after `--settle` |
+| Route / state assertions | ✅ built-in polling | — |
+| System-UI noise filtering | ✅ excluded from diffs | — |
+| Business-layer access | ✅ JSON-RPC bridge | — (UI only) |
+| Runtime | ✅ Python + `hdc`, no daemon | Node.js + daemon |
+| Breadth (platforms / MCP / video / perf) | HarmonyOS only | ✅ 9 targets |
 
-**Breadth — where agent-device reaches further** (mostly beyond HarmonyOS), for the record:
+**vs. AI vision-driven automation (Midscene et al.)**: deterministic selectors vs multimodal screenshots — `autoharmony` wins on 100% determinism, sub-second speed, auditability, and no API key; vision wins when you need to *see* the screen like a human (colors, layout, visual fidelity).
 
-| | autoharmony | agent-device |
-|---|---|---|
-| **Tree diff** | ✅ `uniqueId`-paired, compact | ✅ `diff snapshot` |
-| **Tap / input / wait** | ✅ | ✅ |
-| **Screenshot / video** | ✅ screenshot | ✅ screenshot + device recording |
-| **App lifecycle** | Deep link only | ✅ `open` / `close` / `install` |
-| **Keyboard control** | — | ✅ `keyboard enter` / `dismiss` |
-| **Gestures** | swipe + direction | ✅ `swipe` / `pan` / `fling` |
-| **Device app logs** | — | ✅ `logs` (`hilog`) |
-| **Memory / perf** | — | ✅ RSS on HarmonyOS |
-| **MCP server / Node.js API** | — | ✅ |
-| **Platforms** | HarmonyOS only | 9 target families |
-
-### vs. AI vision-driven automation (Midscene et al.)
-
-| | **autoharmony** | Midscene.js |
-|---|---|---|
-| **Trigger** | Deterministic selectors (text / id / type) | Multimodal VLM reading screenshots |
-| **Determinism** | 100% — same input, same verdict, every run | Probabilistic — model-dependent |
-| **Speed** | Sub-second per action, fully local | Seconds per action (model inference) |
-| **Auditability** | Every action → widget-tree diff + verdict line | Replay depends on current model state |
-| **Runtime deps** | None | VLM API key or self-hosted model |
-| **Crash detection** | ✅ process-level | ❌ visual models can't see it |
-| **Dialog handling** | ✅ deterministic | ⚠️ probabilistic |
-| **Business-layer access** | ✅ JSON-RPC | ❌ UI only |
-
-**The honest split:** need breadth — nine platforms, app install, keyboard control, device logs, MCP/Node tooling, device clouds — use agent-device. Need to *see* the UI like a human (color, layout, visual polish) — use a vision-driven tool. But for a **deterministic, fast HarmonyOS regression loop** — text-grid screen, `scroll-find`, auto-cleared dialogs, crashes in the verdict, built-in route/state assertions, a business-layer bridge, all on Python + `hdc` — `autoharmony` is built for exactly that.
-
-> agent-device's HarmonyOS coverage is per its [HarmonyOS command boundary](https://oss.callstack.com/agent-device/docs/commands); check `agent-device capabilities --platform harmonyos` on your own device for the authoritative list.
-
-**Scope caveat — this comparison is about HarmonyOS.** On Android and iOS, agent-device's backends are mature and full: XCTest and the Android snapshot helper, multi-touch gestures (`pan` / `pinch` / `rotate` / `transform` / `drag`), `alert`, clipboard, keyboard, push, `logcat` / `xctrace` / Simpleperf / Perfetto profiling, React DevTools, video recording, and `.apk` / `.aab` / `.app` / `.ipa` install. `autoharmony` doesn't run on either platform. **If Android or iOS is your target, use agent-device.** The table above is strictly "what each gives you on HarmonyOS."
+**If your target platform is Android or iOS, use agent-device.** Full comparison (Chinese, with measured data): [docs/COMPARISON.md](docs/COMPARISON.md)
 
 ---
 
@@ -370,15 +329,58 @@ mkdir -p ~/.config/opencode/skills/autoharmony && cp autoHarmony/SKILL.md ~/.con
 Per-client setup, config snippets, and the explore → record → replay loop:
 → [docs/agent-guides/](docs/agent-guides/)
 
-## Requirements
+---
 
-- Python 3.9+
-- `hdc` (HarmonyOS Device Connector) in PATH
-- A HarmonyOS device over USB or network
+## FAQ
+
+**Does it support emulators?**
+Yes — any HarmonyOS device `hdc` can reach, emulators included (both real devices and emulators have measured runs; emulator dump ~1.9s).
+
+**How do I configure my app's bundle name?**
+`export HMUITEST_BUNDLE=com.your.app` (applies to all commands), or edit `FALLBACK_BUNDLE` in `utils/bundle.py`. Without it, the default is `com.cmcc.DigitalHome` (the host app used during development).
+
+**How does this relate to Hypium / Appium?**
+Not a replacement. Hypium is an on-device test framework — **humans** author the cases; `autoharmony` is an agent-driven CLI — the **agent** explores, records, and replays. They coexist: stable critical paths can still be promoted to Hypium/pytest suites.
+
+**Does it need root or app instrumentation?**
+No. It relies only on `hdc` + the system `uitest` API — zero intrusion into the app under test. The business Bridge is an optional enhancement, not a requirement.
+
+**Windows / Linux?**
+Yes — pure Python + `hdc`, no platform-specific code. Primary development and validation happen on macOS; Windows/Linux feedback is welcome.
+
+**Why not screenshots + a vision model?**
+Determinism, speed, auditability: vision depends on the model (same input may yield different verdicts), is slow (seconds of inference), and cannot detect process crashes. `autoharmony` turns the screen into text and judgment into code. When you do need visual checks (colors, layout fidelity), pair it with a vision tool.
+
+**Is the business Bridge required?**
+No. Pure UI actions (click / input / assertions) need nothing on the app side. Configure it only when the agent must reach business state directly (login session, device lists, …) — see [docs/BRIDGE.md](docs/BRIDGE.md).
+
+**How do I wire it into CI?**
+Exit codes work out of the box: 0 pass, 1 fail, 2 usage error. `autoharmony --json script run suite.json` runs the whole regression in one command, with directly parseable JSON on stdout.
+
+---
+
+## Documentation map
+
+| Doc | Contents |
+|---|---|
+| [docs/USAGE.md](docs/USAGE.md) | Full command reference |
+| [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) | Agent integration guide (explore → record → replay) |
+| [docs/EXAMPLES.md](docs/EXAMPLES.md) | Real-world cases and workflows |
+| [docs/BRIDGE.md](docs/BRIDGE.md) | JSON-RPC bridge protocol and ArkTS server example |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | Architecture and implementation details |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Full comparison vs. agent-device / vision tools (Chinese) |
+| [docs/PROOF_DUMP_SPEED.md](docs/PROOF_DUMP_SPEED.md) | Dump-speed measurement report |
+| [docs/agent-guides/](docs/agent-guides/) | Per-client setup guides (Claude Code / Cursor / Codex / opencode, 8 clients) |
+| [SKILL.md](SKILL.md) | Agent skill definition file |
 
 ## Contributing
 
 Issues and PRs welcome — especially new engines, better verdicts, and real-world agent integrations.
+
+- **Dev setup**: `git clone` then `pip install -e .` — edits take effect immediately.
+- **Layout**: `autoharmony.py` is the CLI entry; `engines/` holds the core (hdc / semantic / diff / verdict / batch); `analyzers/` widget-tree analysis; `bridge/` business bridge; `utils/` helpers.
+- **Before submitting**: on a real device, run `autoharmony --json ui click-by-text "设置"` to confirm the basic path works.
+- **Zero-dependency constraint**: `requirements.txt` stays empty (stdlib only) — please don't introduce external packages.
 
 ---
 

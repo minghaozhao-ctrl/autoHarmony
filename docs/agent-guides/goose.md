@@ -21,7 +21,7 @@ Verify ArkTS/UI changes on device before saying done:
 - Record once, replay forever:
   - `autoharmony script record start` → ui commands → `autoharmony script record stop --output flow.json`
   - after code change: `autoharmony script run flow.json --json`
-- Explore first: `autoharmony tree dump --overview --json`
+- Explore first: `autoharmony tree dump --json`
 - `autoharmony ui dismiss-dialogs` clears blocking overlays.
 ```
 

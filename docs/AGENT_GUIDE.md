@@ -119,7 +119,7 @@ python3 autoharmony.py script run regression.json --json
 # → step 3 failed: NOT_FOUND "旧按钮文本"
 
 # 2. Agent investigates current UI
-python3 autoharmony.py tree dump --overview --json
+python3 autoharmony.py tree dump --json
 
 # 3. Agent finds new text, updates script
 # (agent edits regression.json with new target)
@@ -246,7 +246,7 @@ def robust_action(action_args: list[str], max_retries: int = 3) -> dict:
         
         if result["status"] == "NOT_FOUND":
             # Agent investigates and finds new target
-            tree = run_autoharmony(["tree", "dump", "--overview", "--json"])
+            tree = run_autoharmony(["tree", "dump", "--json"])
             # Agent analyzes tree and updates action_args
             break
     

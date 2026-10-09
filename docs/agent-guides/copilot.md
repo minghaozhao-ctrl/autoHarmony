@@ -20,7 +20,7 @@ Verify on device before claiming an ArkTS change is done:
 - Record → replay:
   - `autoharmony script record start` → run ui commands → `autoharmony script record stop --output flow.json`
   - after code change: `autoharmony script run flow.json --json`
-- Explore first: `autoharmony tree dump --overview --json`
+- Explore first: `autoharmony tree dump --json`
 - `autoharmony ui dismiss-dialogs` unblocks overlay popups.
 ```
 

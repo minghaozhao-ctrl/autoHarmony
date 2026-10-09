@@ -23,7 +23,7 @@ Whenever you change ArkTS/UI code, verify it ON the device before saying "done":
   - ... run ui commands ...
   - `autoharmony script record stop --output flow.json`
   - after code changes: `autoharmony script run flow.json --json`
-- First explore: `autoharmony tree dump --overview --json` to see the widget tree.
+- First explore: `autoharmony tree dump --json` to see the widget tree.
 - `autoharmony ui dismiss-dialogs` clears overlay popups that block actions.
 - Never uninstall shells: if a step fails, re-dump the tree and read the verdict reason before retrying.
 ```

@@ -3,16 +3,27 @@
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/autoharmony.git
-cd autoharmony
-pip install -r requirements.txt
+pipx install git+https://github.com/minghaozhao-ctrl/autoHarmony.git   # recommended
+# or
+pip install git+https://github.com/minghaozhao-ctrl/autoHarmony.git
+
+# from source (development)
+git clone https://github.com/minghaozhao-ctrl/autoHarmony.git
+cd autoHarmony && pip install -e .
 ```
+
+No runtime dependencies beyond the Python standard library and the `hdc` CLI.
 
 Make sure `hdc` is in your PATH and a device is connected:
 
 ```bash
 hdc list targets
+export HMUITEST_BUNDLE=com.your.app   # your app's bundleName
 ```
+
+After installation, invoke via the `autoharmony` command (examples below use
+`autoharmony`; when running from a source checkout, `python3 autoharmony.py`
+works identically).
 
 ## UI Actions
 
@@ -136,7 +147,7 @@ python3 autoharmony.py ui click 540 550 --auto-handle-dialog --expect-text "成�
 
 ```bash
 # Analyze local file
-python3 autoharmony.py tree show tree.json --overview
+python3 autoharmony.py tree show tree.json
 
 # Search by type
 python3 autoharmony.py tree show tree.json --type Button
@@ -157,7 +168,7 @@ python3 autoharmony.py tree show tree.json --detail 5
 python3 autoharmony.py tree show tree.json --text "设置" --json
 
 # Dump from device
-python3 autoharmony.py tree dump --overview
+python3 autoharmony.py tree dump
 
 # Diff two files
 python3 autoharmony.py tree diff before.json after.json --operation "Open settings"
