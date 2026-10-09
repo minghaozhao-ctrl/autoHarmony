@@ -1,0 +1,320 @@
+engines/assertions.py
+  4b3611fb3f5157b5 10
+analyzers/widget_tree.py
+  4b3611fb3f5157b5 45,58,65-85,94,106,252,254-255,257,259,262,273-277,279-280,381,433,440-441,448,455,463
+engines/hdc_engine.py
+  4b3611fb3f5157b5 113-114,116-119,158-162,164-166,171,198-201,221-222,226,262-263,266-268,286,347-351,454-463,465-467,469
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.9",
+  "base_commit_sha": "5b3ff06bf60f944cb63ca8d51460ba82763590cc",
+  "prompts": {
+    "13a5498ae2030f40": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f5185533effedqDt4FfmEYiHH7",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 12,
+      "overriden_lines": 0
+    },
+    "209f9a7ccd57e916": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f4da7e1d8ffe5vb7ukUBQqit15",
+        "model": "EPX/cmhi/deepseek-v4-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "4b3611fb3f5157b5": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f15a2741fffePJJJ03cO3mk0cy",
+        "model": "opencode-go/deepseek-v4.1-flash"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 94,
+      "total_deletions": 40,
+      "accepted_lines": 96,
+      "overriden_lines": 0
+    },
+    "5d17c93731f225be": {
+      "agent_id": {
+        "tool": "iHome",
+        "id": "ses_f9a2100aeffeCDfhvHExfMzOli",
+        "model": "opencode/big-pickle"
+      },
+      "human_author": "zhaominghao <zhaominghao@cmhi.chinamobile.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  },
+  "commit_stats": {
+    "git_diff_added_lines": 504,
+    "git_diff_deleted_lines": 267,
+    "ai_additions": 93,
+    "ai_accepted": 93,
+    "BYMC": 410,
+    "mixed_additions": 0,
+    "BYAC": 93,
+    "BYRC": 0,
+    "per_file": {
+      "SKILL.md": {
+        "BYMC": [
+          "115"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "analyzers/widget_tree.py": {
+        "BYMC": [],
+        "BYAC": [
+          "45",
+          "58",
+          "65-85",
+          "94",
+          "106",
+          "252",
+          "254-255",
+          "257",
+          "259",
+          "262",
+          "273-277",
+          "279-280",
+          "381",
+          "433",
+          "440-441",
+          "448",
+          "455",
+          "463"
+        ],
+        "BYRC": []
+      },
+      "autoharmony.py": {
+        "BYMC": [
+          "150",
+          "152",
+          "206-207",
+          "209",
+          "211-216",
+          "219-220",
+          "228",
+          "232",
+          "234-296",
+          "307-312",
+          "316",
+          "542",
+          "558-559",
+          "574-576",
+          "583-587",
+          "633-634",
+          "646",
+          "648-649",
+          "688-689",
+          "701-702",
+          "724-730",
+          "958-959",
+          "1116-1117",
+          "1673",
+          "1675",
+          "1677",
+          "1679-1681",
+          "1683",
+          "1685",
+          "1736",
+          "1772",
+          "1775",
+          "1793",
+          "1803",
+          "1830",
+          "1840",
+          "1850",
+          "1857-1860",
+          "1866",
+          "1876",
+          "1883",
+          "1894",
+          "1901",
+          "1908",
+          "1915",
+          "1922",
+          "1930",
+          "1938",
+          "1941-1943",
+          "1950",
+          "1965",
+          "1994",
+          "2001",
+          "2008",
+          "2020",
+          "2031",
+          "2048",
+          "2078",
+          "2081",
+          "2086",
+          "2091",
+          "2098",
+          "2108",
+          "2111",
+          "2120",
+          "2128",
+          "2131",
+          "2206-2207"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "docs/REFERENCE.md": {
+        "BYMC": [
+          "35-46",
+          "572-573",
+          "575"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/assertions.py": {
+        "BYMC": [
+          "11",
+          "87-90",
+          "106-109",
+          "170-172",
+          "177-179"
+        ],
+        "BYAC": [
+          "10"
+        ],
+        "BYRC": []
+      },
+      "engines/batch_runner.py": {
+        "BYMC": [
+          "322-328",
+          "472-478",
+          "553-554",
+          "561-565",
+          "589-591"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/diff_engine.py": {
+        "BYMC": [
+          "87-93",
+          "98",
+          "200-205",
+          "253-257",
+          "262-267",
+          "271-283",
+          "287-298",
+          "379-383",
+          "394",
+          "410-412",
+          "449",
+          "510",
+          "560",
+          "568",
+          "623",
+          "699",
+          "704",
+          "708",
+          "963"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/hdc_engine.py": {
+        "BYMC": [],
+        "BYAC": [
+          "113-114",
+          "116-119",
+          "158-162",
+          "164-166",
+          "171",
+          "198-201",
+          "221-222",
+          "226",
+          "262-263",
+          "266-268",
+          "286",
+          "347-351",
+          "454-463",
+          "465-467",
+          "469"
+        ],
+        "BYRC": []
+      },
+      "engines/semantic_engine.py": {
+        "BYMC": [
+          "406-407",
+          "426-427",
+          "457-463",
+          "588-595",
+          "612-619",
+          "729",
+          "743-744",
+          "752",
+          "770-778",
+          "784",
+          "792-798",
+          "802",
+          "807",
+          "814",
+          "819",
+          "1087-1097"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "engines/verdict.py": {
+        "BYMC": [
+          "237-243",
+          "877-889",
+          "904-914",
+          "924-927",
+          "929-930",
+          "935-936",
+          "942-943",
+          "949-952",
+          "956"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/device_lock.py": {
+        "BYMC": [
+          "25",
+          "30",
+          "44",
+          "50",
+          "64"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      },
+      "utils/hdc.py": {
+        "BYMC": [
+          "85-86",
+          "89-90"
+        ],
+        "BYAC": [],
+        "BYRC": []
+      }
+    }
+  },
+  "commit_timestamp": 1791509925,
+  "requirement_id": "UNIAPP-109652"
+}
